@@ -107,7 +107,7 @@ import {
 } from './context-tool';
 import { dropRefusalHistory } from './refusal-filter';
 import { replyToolsFor } from './reply-tool';
-import { IMAGE_MODEL_NAME, drawLineOf, drawPromptOf, drawToolsFor, requestImage } from './image-tool';
+import { IMAGE_MODEL_NAME, drawPromptOf, drawToolsFor, requestImage } from './image-tool';
 import { STAMP_OFFSET_MINUTES, stripStamp } from './stamp';
 import { unwrapToolReply, unwrapToolReplyStream } from './tool-shell';
 import { stripWrapperTags } from './wrapper-tags';
@@ -1472,12 +1472,8 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
             const first = await streamContext(request);
             raw = first.text;
             finishReason = first.finishReason;
+            // 画图那一轮：正文不从工具参数里抠——图出来之后再用一次请求让主模型写（见下方）
             drawPrompt = drawPromptOf(first.calls);
-            if (drawPrompt !== null) {
-              // 画图那一轮：台词在 say 里；没给就保留模型自己写的正文（有就发），再没有才是纯图
-              const spoken = drawLineOf(first.calls);
-              if (spoken !== null) raw = spoken;
-            }
             // §59 补交付：一个字正文都没交、却调过工具（线上就是只调了 context 交白卷）——
             // 再问一次，这一回合没有 context 可调，只能把正文写进 story_reply。
             // 仍然空才交给下面那条空回判定（原地重试，见 catch）
@@ -1543,6 +1539,32 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
             } catch (error) {
               // 生成失败不能静默：这一轮宁可当空回重试，也不发一张空白图
               emit('warn', 'chat', '图片生成失败 key=' + decrypted.label + ' ' + describeError(error));
+            }
+            // 图有了就轮到正文：仍由主模型（4a）自己写一遍，和普通回合同一条路径。
+            // 同一次响应里已经交了 story_reply 的话 raw 非空，不再多问一次
+            if (imageResult !== undefined && raw.trim() === '') {
+              const lineRequest: LlmRequest = {
+                model: model.model,
+                system: contextReplySystem,
+                messages: [
+                  ...messages,
+                  {
+                    role: 'user',
+                    content:
+                      '（刚刚按这个画面画了一张图，已经发给用户了：' + drawPrompt + '）' +
+                      '请照设定写这一轮的正文，可以自然提到这张图，但不要描述画图过程，也不要说自己调用了工具。',
+                  },
+                ],
+                ...(images.length > 0 ? { images } : {}),
+                ...sampling,
+                ...contextReplyFields,
+                reasoningEffort: CONTEXT_TOOL_REASONING_EFFORT,
+              };
+              if (temperature !== undefined) lineRequest.temperature = temperature;
+              if (maxTokens !== undefined) lineRequest.maxTokens = maxTokens;
+              const line = await streamContext(lineRequest);
+              raw = line.text;
+              finishReason = line.finishReason;
             }
           }
           // 上游把流干净地关掉却一个字都没给（上下文工具模式则在拼回调用之后仍然没有正文）：

@@ -3694,7 +3694,7 @@ describe('画图工具（draw_image）', () => {
   const DRAW_PRESET = '你是示例角色。每次回复都调用 story_reply，把正文放进 content。想画画时调用 draw_image。';
   const DRAW_ARGS = JSON.stringify({ prompt: '一只橘猫坐在窗台上' });
 
-  it('模型只给 prompt 不给 say：只发图不发字，历史留 [图片]，工具表里多一条', async () => {
+  it('模型反复只调 draw_image：第二段也交不出正文时只发图，历史留 [图片]，工具表里多一条', async () => {
     const requests: LlmRequest[] = [];
     const harness = makeHarness({
       providers: {
@@ -3736,17 +3736,23 @@ describe('画图工具（draw_image）', () => {
     }
   });
 
-  it('模型给了 say：图与台词一起回来，历史存台词而不是 [图片]', async () => {
+  it('图画好之后正文由主模型再写一次：第二段只带回复工具，历史存正文', async () => {
     const requests: LlmRequest[] = [];
+    let turn = 0;
     const harness = makeHarness({
       providers: {
         'openai-compat': toolProvider(
           'openai-compat',
-          {
-            text: '',
-            toolCalls: [
-              { name: 'draw_image', arguments: JSON.stringify({ prompt: '一只橘猫坐在窗台上', say: '画好啦，橘猫在窗台上晒太阳。' }) },
-            ],
+          async () => {
+            turn += 1;
+            return turn === 1
+              ? { text: '', toolCalls: [{ name: 'draw_image', arguments: DRAW_ARGS }] }
+              : {
+                  text: '',
+                  toolCalls: [
+                    { name: 'story_reply', arguments: JSON.stringify({ game_content: '画好啦，橘猫在窗台上晒太阳。' }) },
+                  ],
+                };
           },
           { onRequest: (req) => requests.push(req) },
         ),
@@ -3769,8 +3775,9 @@ describe('画图工具（draw_image）', () => {
       expect(result.text).toBe('画好啦，橘猫在窗台上晒太阳。');
       expect(result.image?.mime).toBe('image/jpeg');
       expect(harness.appendCalls[0]?.messages[1]?.content).toBe('画好啦，橘猫在窗台上晒太阳。');
-      const drawToolDef = requests[0]?.tools?.find((tool) => tool.function.name === 'draw_image');
-      expect(drawToolDef?.function.parameters?.required).toEqual(['prompt', 'say']);
+      expect(requests).toHaveLength(2);
+      expect(requests[1]?.tools?.map((tool) => tool.function.name)).toEqual(['story_reply']);
+      expect(String(requests[1]?.messages.at(-1)?.content)).toContain('已经发给用户了');
     } finally {
       vi.unstubAllGlobals();
     }

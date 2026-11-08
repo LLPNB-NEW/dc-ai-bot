@@ -17,9 +17,6 @@ export const IMAGE_MODEL_NAME = 'gemini-3.1-flash-image';
 /** prompt 上限与中继侧一致；超了截断，不因此判整轮失败 */
 export const IMAGE_PROMPT_MAX_CHARS = 8000;
 
-/** 台词上限：一两句话够用；超了截断，不因此判整轮失败 */
-export const DRAW_LINE_MAX_CHARS = 600;
-
 /** 生图比聊天慢（实测 10–30 秒），给足预算；超时按这一把 Key 失败处理 */
 const IMAGE_TIMEOUT_MS = 180_000;
 
@@ -31,17 +28,13 @@ export function drawTool(): ChatTool {
     function: {
       name: DRAW_TOOL_NAME,
       description:
-        '画一张图并发到频道，同时说一两句话。用户让你画、要一张图、说「画个…」时调用；prompt 写清楚画面内容、风格与构图，say 写画完之后要对用户说的话（一两句，符合人设，不要描述画图过程），图会先发出去、say 接着作为这一轮的正文。',
+        '画一张图并直接发到频道。用户让你画、要一张图、说「画个…」时调用；prompt 写清楚画面内容、风格与构图。图画好之后会再让你写这一轮的正文。',
       parameters: {
         type: 'object',
         properties: {
           prompt: { type: 'string', description: '要画什么：主体、动作、场景、风格；越具体越好' },
-          say: {
-            type: 'string',
-            description: '画完之后要对用户说的一两句话，符合人设；这句会作为这一轮的正文发出去',
-          },
         },
-        required: ['prompt', 'say'],
+        required: ['prompt'],
       },
     },
   };
@@ -51,8 +44,8 @@ export function drawToolsFor(preset: string): ChatTool[] {
   return preset.indexOf(DRAW_TOOL_NAME) === -1 ? [] : [drawTool()];
 }
 
-/** 从拼回的调用里取某个字符串参数；没调、参数坏、该字段为空都返回 null */
-function stringArgOf(calls: readonly ChatToolCall[], key: string, maxChars: number): string | null {
+/** 从拼回的调用里取 draw_image 的 prompt；没调、参数坏、prompt 为空都返回 null */
+export function drawPromptOf(calls: readonly ChatToolCall[]): string | null {
   const call = calls.find((item) => item.name === DRAW_TOOL_NAME);
   if (call === undefined) return null;
   let parsed: unknown;
@@ -62,19 +55,9 @@ function stringArgOf(calls: readonly ChatToolCall[], key: string, maxChars: numb
     return null;
   }
   if (typeof parsed !== 'object' || parsed === null) return null;
-  const value = (parsed as Record<string, unknown>)[key];
-  const text = typeof value === 'string' ? value.trim() : '';
-  return text === '' ? null : text.slice(0, maxChars);
-}
-
-/** draw_image 的 prompt；没调、参数坏、prompt 为空都返回 null */
-export function drawPromptOf(calls: readonly ChatToolCall[]): string | null {
-  return stringArgOf(calls, 'prompt', IMAGE_PROMPT_MAX_CHARS);
-}
-
-/** draw_image 的 say：画完要说的那一两句；缺省时这一轮就只有图、没有正文 */
-export function drawLineOf(calls: readonly ChatToolCall[]): string | null {
-  return stringArgOf(calls, 'say', DRAW_LINE_MAX_CHARS);
+  const value = (parsed as Record<string, unknown>).prompt;
+  const prompt = typeof value === 'string' ? value.trim() : '';
+  return prompt === '' ? null : prompt.slice(0, IMAGE_PROMPT_MAX_CHARS);
 }
 
 export interface GeneratedImage {
