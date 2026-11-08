@@ -5275,14 +5275,14 @@ export interface ToolCallDelta {
 
 - **工具门控照抄 `story_reply`**：`drawToolsFor(preset)`（`src/core/chat/image-tool.ts:43`）只在 `preset.indexOf('draw_image') !== -1` 时返回工具；预设没写的频道，请求体里连这条工具都不存在，形状与加这层之前逐字相同。
 - **只在上下文工具模式装配**：`src/core/chat/service.ts:1288` `const drawTools = contextToolMode ? drawToolsFor(promptParts.before + '\n' + promptParts.after) : [];`，同时进普通 `tools`（`:1289`）与 `contextToolFields`（`:1346-1347` 的 `tools: [...buildContextTools(contextBody), ...drawTools]`、`toolChoice: 'auto'`）。
-- **命中就清空正文**：`:1475` `drawPrompt = drawPromptOf(first.calls);`，非 `null` 时 `raw = ''`（`:1476`）；同时让 §59 的「空回补交付」不再问一次（`:1480` 的条件带 `drawPrompt === null`）——工具已经交付了这一轮，再问一次只会多花一次调用。
+- **命中就把正文换成台词**：`:1475` `drawPrompt = drawPromptOf(first.calls);`，非 `null` 时再取 `drawLineOf(first.calls)`（`say`，`src/core/chat/image-tool.ts:76`）；取了就用它当正文，没取到才保留模型自己写的正文（`draw-image-3` 之前是直接 `raw = ''`、只发图）。同时让 §59 的「空回补交付」不再问一次（`:1480` 的条件带 `drawPrompt === null`）——工具已经交付了这一轮，再问一次只会多花一次调用。
 - **生图用当前这把 Key 的 baseUrl**：`requestImage()`（`src/core/chat/image-tool.ts:86`）→ `POST {baseUrl}/images/generations`，body 固定 `{model:'gemini-3.1-flash-image', prompt, n:1, response_format:'b64_json'}`，超时 `AbortSignal.timeout(IMAGE_TIMEOUT_MS=180_000)`（`:21`）。认 `data[0].b64_json`，也认 `data[0].url` 的 `data:` 形式；三种失败各有错误码：`IMAGE_HTTP`（`:107`，带状态与 200 字原文）、`IMAGE_BAD_JSON`（`:112`）、`IMAGE_MISSING`（`:121`，上游 2xx 但没图）。
 - **发图与文字分两步**：`src/workers/gateway/engine.ts:744` 取 `result.image`；`:747` 只发图那轮正文留空串，不再补「（模型没有返回内容）」；`:759` `imageOnly = image !== undefined && text.trim() === ''`；`:761-769` 调 `channel.sendFile` 发附件，文件名按 mime 取 `image.png` / `image.webp` / `image.jpg`（Discord 靠后缀预览）；`:776` 只有「图没发出去且没正文」才补一句「（图片没发出去）」；`:778` `if (!imageOnly || !imageSent)` 才建那条文字消息。
 - **空回判据放行图片**：`:1546` `if (raw.trim() === '' && imageResult === undefined)` 才算空回；生成失败不吞（`:1541` `图片生成失败 key=…`），宁可这轮按空回重试，也不放一张空白图出去。
 
 ### 69.3 代码地图
 
-- 新文件 `src/core/chat/image-tool.ts`：`DRAW_TOOL_NAME='draw_image'`（`:9`）、`IMAGE_MODEL_NAME='gemini-3.1-flash-image'`（`:15`）、`IMAGE_PROMPT_MAX_CHARS=8000`（`:18`）、`drawTool()`（`:25`，参数只有必填 `prompt`）、`drawToolsFor()`（`:43`）、`drawPromptOf()`（`:48`，没调/参数坏/空串都返回 `null`，超长截断）、`requestImage()`（`:86`）。
+- 新文件 `src/core/chat/image-tool.ts`：`DRAW_TOOL_NAME='draw_image'`（`:9`）、`IMAGE_MODEL_NAME='gemini-3.1-flash-image'`（`:15`）、`IMAGE_PROMPT_MAX_CHARS=8000`（`:18`）、`drawTool()`（`:25`，必填 `prompt` 与 `say`）、`drawToolsFor()`（`:43`）、`drawPromptOf()`（`:48`，没调/参数坏/空串都返回 `null`，超长截断）、`drawLineOf()`（`:76`，同上，台词上限 `DRAW_LINE_MAX_CHARS=600`）、`requestImage()`（`:86`）。
 - 服务层 `src/core/chat/service.ts`：`:1471-1476` 分流、`:1521-1542` 调 `requestImage` 并打 `图片回复 model=… key=… prompt=<字数> bytes=… ms=…` 或 `图片生成失败`、`:1546` 空回、`:1634` `result.image`、`:1650` 落库 `[图片]`、`:1670` 成功日志尾部的 `image=1`、`:1681` 没有正文就不问表情模型。
 - 发送侧：`src/workers/gateway/engine.ts:734` `TurnResult.image`、`:757-777` 附件发送、`:772` `发送图片失败：`；`src/workers/gateway/channel-rest.ts:32` 的 `sendFile?(channelId, bytes, file?)` 与 `:80` 的实现；`src/workers/discord/rest.ts:120` `ChannelFileShape`、`:131` `sendChannelFile(…, shape?)`。
 - 门牌：`GATEWAY_BUILD = 'draw-image-2'`（`src/workers/gateway/engine.ts:131`，`test/gateway.node.test.ts:229` 同步）。
@@ -5311,3 +5311,14 @@ export interface ToolCallDelta {
 - `n` 固定 1；Discord 附件上限 10 MB，线上实测 0.7–0.8 MB；prompt 超过 8000 字截断后续画，不判整轮失败。
 - 图片不参与下一轮的多模态理解：历史里只有 `[图片]` 占位，模型记得自己画过，但看不到那张图。
 - 没有新迁移，迁移总数仍是 31。
+### 69.7 画完还得说话：台词放进同一个调用（draw-image-3，2026-11-09）
+
+- 之前那一版是「只发图、不配台词」：模型调 `draw_image` 后 `raw` 被清空，正文为空，引擎连那条文字消息都不建。现在要求图与台词都出现，但仍然**不增加一次模型调用**。
+- 做法：`draw_image` 的参数从只有一个 `prompt` 变成 `prompt` + `say`（两个都必填，台词上限 `DRAW_LINE_MAX_CHARS=600`）。模型在同一次工具调用里把画面和台词一起交出来，`drawLineOf()`（`src/core/chat/image-tool.ts:76`）取 `say` 当本轮正文；`say` 缺省、空串、参数坏就退回「模型自己写的正文」，再没有才是纯图（旧行为留成兜底）。
+- 发送顺序不变：先 `sendFile` 发图，再走原来的 `chunkMessage` / `stream.finish` 发台词（`src/workers/gateway/engine.ts:761-778`）。台词照常吃 `resolveInlineEmojis`、@ 提及与 1900 字切段；图与台词是相邻两条消息。
+- 落库：有台词存台词（`src/core/chat/service.ts:1650`），没有才存 `[图片]`。
+- 线上预设同步：主频道 `123456789012345678` 的第 37 段正文换成「…调用 draw_image：prompt 写清画面（主体、动作、场景、风格），say 写你画完之后要对用户说的那一两句（符合人设，不要描述画图过程）；图会先发出去，say 会接着作为这一轮的正文。」——只动这一段，其它段一个字没改。
+- 工具说明一并改了：`drawTool().function.description` 明说「图会先发出去、say 接着作为这一轮的正文」，免得模型按旧文案只交画面。
+- 测试：`test/chat.image-tool.test.ts` 新增 `drawLineOf` 的取值/缺省/超长三例，`required` 断言改成 `['prompt','say']`；`test/chat.service.test.ts` 新增「模型给了 say」一例（正文是台词、历史存台词、工具定义里 `say` 必填）。门槛：`npm run typecheck` 0；`npm test` **88 文件 1643 例全过**；`npm run test:node` **118 通过 +1 跳过**。
+- 门牌：`GATEWAY_BUILD = 'draw-image-3'`（`src/workers/gateway/engine.ts:132`，`test/gateway.node.test.ts:229` 同步）。
+- 边界：台词由模型自己写，我们只截断不润色；图与台词不是同一条消息（Discord 附件上传这里没有 caption），要合成一条得另做 multipart 的 `content`；纯图兜底仍在，模型偶尔不给 `say` 时这轮就只有图。
