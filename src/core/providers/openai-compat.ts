@@ -88,6 +88,8 @@ function bodyOf(req: LlmRequest, stream: boolean): Record<string, unknown> {
           tools: req.tools,
           ...(req.toolChoice === undefined ? {} : { tool_choice: req.toolChoice }),
         }),
+    // 结构化输出：缺省时连键都不出现，旧请求体逐字节不变；给了就原样透传，由中继翻成上游 schema
+    ...(req.responseFormat === undefined ? {} : { response_format: req.responseFormat }),
     stream,
   };
 }

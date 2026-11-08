@@ -1,4 +1,12 @@
-import type { CustomEmoji, LlmImage, LlmRequest, ReactionModelConfig, ReactionRequest, ReactionTarget } from '../types';
+import type {
+  CustomEmoji,
+  LlmImage,
+  LlmRequest,
+  LlmResponseFormat,
+  ReactionModelConfig,
+  ReactionRequest,
+  ReactionTarget,
+} from '../types';
 import { MAX_REACTIONS, parseReactionValue, reactionKey, splitReactDirectives } from './react';
 import { renderReactionMaterial } from './reaction-template';
 
@@ -26,6 +34,28 @@ const NO_REACTION = new Set(['NONE', 'none', '无', '不贴']);
  * 回复开头于是多一行 NONE；放这里，主模型那一侧永远看不到这句话。
  */
 export const NO_REACTION_NOTE = '没有值得贴的表情时，只回一行 NONE，不要解释为什么。';
+
+/**
+ * 表情选择的结构化输出契约：中继把它翻成上游的 response_mime_type / response_schema，
+ * 模型只需填一个字符串字段，省掉「表情 + 一行解释」这种要再猜第一 token 的纯文本；
+ * 但 Anthropic 等不发该键的通道仍回纯文本，所以解析侧必须保留老路径（JSON 只当前缀尝试）。
+ */
+export const REACTION_RESPONSE_FORMAT: LlmResponseFormat = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'reaction_choice',
+    schema: {
+      type: 'object',
+      properties: {
+        reaction: {
+          type: 'string',
+          description: '要贴的表情：unicode emoji 或 :名字:，可带 @消息ID / @作者名；这轮不贴就写 NONE',
+        },
+      },
+      required: ['reaction'],
+    },
+  },
+};
 
 /** 一行输出里只取第一个 token：`👍 因为很开心` 的答案是前面那个（§21.3 规则 5） */
 const WHITESPACE = /\s+/;
@@ -154,6 +184,8 @@ export function buildReactionRequest(
     model: cfg.model,
     system,
     messages: [{ role: 'user', content }],
+    // 每次都带：少一种「结构化/纯文本」的请求形状，兜底解析放在 normalizeReactions 里统一收
+    responseFormat: REACTION_RESPONSE_FORMAT,
   };
   // 空数组与缺省一样：键都不出现，否则「有没有图」这件事会在下游多出一种形状
   if (input.images !== undefined && input.images.length > 0) request.images = input.images;
@@ -226,13 +258,35 @@ function lineReactions(line: string): ReactionRequest[] {
 }
 
 /**
+ * 结构化输出里可认的三种形状：`{"reaction":"…"}`、顶层字符串、对象里唯一的字符串值。
+ * 显式 reaction 键优先，多出来的说明字段不该把整条答案顶成「形状不认识」；
+ * 认不出就返回 null，让调用方走旧的逐行文本解析——那才是所有通道都保证得了的那条路。
+ */
+function jsonReactionValues(raw: string): string[] | null {
+  let node: unknown;
+  try {
+    node = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof node === 'string') return [node];
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return null;
+  const record = node as Record<string, unknown>;
+  if (typeof record['reaction'] === 'string') return [record['reaction']];
+  const values = Object.values(record).filter((value): value is string => typeof value === 'string');
+  return values.length === 1 ? values : null;
+}
+
+/**
  * 模型整段输出 → 贴表情请求列表（§28.5）：逐行解析、忽略空行与 NONE、按 `表情|目标` 去重、上限 10。
  * 一条都认不出来就返回空数组（这轮不贴），绝不把解释文字当成表情交给下游。
+ * 先整段试 JSON：结构化输出就是一行 JSON，按行切会把缩进切碎；
+ * 失败再走文本——旧通道与旧提示词只保证纯文本，兜底放在 JSON 之后才不丢它们任何一个语义。
  */
 export function normalizeReactions(raw: string): ReactionRequest[] {
   const picked: ReactionRequest[] = [];
   const keys = new Set<string>();
-  for (const line of raw.split('\n')) {
+  for (const line of jsonReactionValues(raw) ?? raw.split('\n')) {
     for (const request of lineReactions(line)) {
       if (picked.length >= MAX_REACTIONS) return picked;
       // 先判 NONE 再收：模型常写「NONE 因为没有合适的表情」，那个 NONE 不能当成表情贴出去

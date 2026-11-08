@@ -429,4 +429,21 @@ describe('anthropic provider — §22.3 本轮附图', () => {
       '{"model":"claude-3-5-sonnet-20241022","system":"SYS","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"again"}],"max_tokens":1024,"stream":false}',
     );
   });
+
+  it('responseFormat 不属于 Anthropic 协议：静默忽略，不出现 response_format，也不报错', async () => {
+    const fake = fakeFetch(() => json({ content: [{ type: 'text', text: 'ok' }] }));
+    const result = await createAnthropicProvider().chat(
+      {
+        ...REQUEST,
+        responseFormat: {
+          type: 'json_schema',
+          json_schema: { name: 'reaction_choice', schema: { type: 'object' } },
+        },
+      },
+      runtime('sk-ant-test', fake.fetch),
+    );
+
+    expect('response_format' in bodyOf(fake.calls[0])).toBe(false);
+    expect(result.text).toBe('ok');
+  });
 });

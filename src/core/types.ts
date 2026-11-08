@@ -256,6 +256,22 @@ export interface ChatTool {
   function: ChatToolFunction;
 }
 
+/**
+ * 结构化输出（response_format）：openai-compat 适配器原样放进请求体，由中继翻成上游的
+ * response_mime_type / response_schema；不发这个键的通道（Anthropic）静默忽略，解析侧仍须兜底纯文本。
+ */
+export type LlmResponseFormat =
+  | { type: 'json_object' }
+  | {
+      type: 'json_schema';
+      json_schema: {
+        /** 上游用它给 schema 起名，只放 ASCII 字母数字与下划线 */
+        name: string;
+        /** JSON Schema 对象：适配器原样序列化，不做校验也不做改写 */
+        schema: Record<string, unknown>;
+      };
+    };
+
 export interface LlmRequest {
   model: string;
   system: string;
@@ -282,6 +298,11 @@ export interface LlmRequest {
    * 对象形式 = 强制调用某一个函数；上游不一定支持（例如 DeepSeek 思考模式会 400）。
    */
   toolChoice?: 'auto' | 'none' | 'required' | { type: 'function'; function: { name: string } };
+  /**
+   * 结构化输出：缺省 = 请求体里不出现 response_format，旧线缆形状逐字不变。
+   * 只有认这个键的适配器（openai-compat）会发；拿不到结构化保证的通道回纯文本，解析侧必须留着老路。
+   */
+  responseFormat?: LlmResponseFormat;
 }
 
 /**

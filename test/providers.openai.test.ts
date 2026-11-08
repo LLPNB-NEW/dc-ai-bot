@@ -1,7 +1,15 @@
 import { createProviders } from '../src/core/providers/index';
 import { createOpenAiCompatProvider } from '../src/core/providers/openai-compat';
 import { describe, expect, it } from 'vitest';
-import type { ChatMessage, ChatTool, LlmChunk, LlmImage, LlmRequest, ProviderRuntime } from '../src/core/types';
+import type {
+  ChatMessage,
+  ChatTool,
+  LlmChunk,
+  LlmImage,
+  LlmRequest,
+  LlmResponseFormat,
+  ProviderRuntime,
+} from '../src/core/types';
 
 interface FakeCall {
   url: string;
@@ -700,5 +708,65 @@ describe('openai-compat provider — tools 兼容性保留', () => {
     expect(body.tools).toEqual([REPLY_TOOL]);
     expect(body.tool_choice).toBe('auto');
     expect(body.stream).toBe(true);
+  });
+});
+
+const REACTION_FORMAT: LlmResponseFormat = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'reaction_choice',
+    schema: {
+      type: 'object',
+      properties: { reaction: { type: 'string' } },
+      required: ['reaction'],
+    },
+  },
+};
+
+describe('openai-compat provider — response_format（结构化输出）', () => {
+  it('responseFormat 原样进 body：新键排在 stream 之前，旧字段顺序一个没动', async () => {
+    const fake = fakeFetch(() => json({ choices: [{ message: { content: '{"reaction":":laugh:"}' } }] }));
+
+    const result = await createOpenAiCompatProvider().chat(
+      { ...REQUEST, responseFormat: REACTION_FORMAT },
+      runtime('sk-test', fake.fetch),
+    );
+
+    const body = bodyOf(fake.calls[0]);
+    expect(body.response_format).toEqual(REACTION_FORMAT);
+    expect(Object.keys(body)).toEqual([
+      'model',
+      'messages',
+      'temperature',
+      'max_tokens',
+      'response_format',
+      'stream',
+    ]);
+    // 中继把 content 原样回给我们，解析交给 normalizeReactions
+    expect(result.text).toBe('{"reaction":":laugh:"}');
+  });
+
+  it('json_object 同样透传；不给 responseFormat 时键不出现', async () => {
+    const fake = fakeFetch(() => json({ choices: [{ message: { content: 'ok' } }] }));
+    const provider = createOpenAiCompatProvider();
+
+    await provider.chat({ ...REQUEST, responseFormat: { type: 'json_object' } }, runtime('sk-test', fake.fetch));
+    expect(bodyOf(fake.calls[0]).response_format).toEqual({ type: 'json_object' });
+
+    await provider.chat(REQUEST, runtime('sk-test', fake.fetch));
+    expect('response_format' in bodyOf(fake.calls[1])).toBe(false);
+  });
+
+  it('chatStream 走同一个 bodyOf：流式也带 response_format', async () => {
+    const fake = fakeFetch(() => sse(['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n']));
+
+    await collect(
+      createOpenAiCompatProvider().chatStream(
+        { ...REQUEST, responseFormat: REACTION_FORMAT },
+        runtime('sk-test', fake.fetch),
+      ),
+    );
+
+    expect(bodyOf(fake.calls[0]).response_format).toEqual(REACTION_FORMAT);
   });
 });
