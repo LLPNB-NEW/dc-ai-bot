@@ -36,6 +36,12 @@ const NO_REACTION = new Set(['NONE', 'none', '无', '不贴']);
 export const NO_REACTION_NOTE = '没有值得贴的表情时，只回一行 NONE，不要解释为什么。';
 
 /**
+ * 挑一个表情不需要深想（§21）：给这条支线钉最低档，省下几秒思考时间；
+ * 认这个键的通道才发，Anthropic 等不发该键的通道忽略它。
+ */
+export const REACTION_REASONING_EFFORT = 'low';
+
+/**
  * 表情选择的结构化输出契约：中继把它翻成上游的 response_mime_type / response_schema，
  * 模型只需填一个字符串字段，省掉「表情 + 一行解释」这种要再猜第一 token 的纯文本；
  * 但 Anthropic 等不发该键的通道仍回纯文本，所以解析侧必须保留老路径（JSON 只当前缀尝试）。
@@ -186,6 +192,7 @@ export function buildReactionRequest(
     messages: [{ role: 'user', content }],
     // 每次都带：少一种「结构化/纯文本」的请求形状，兜底解析放在 normalizeReactions 里统一收
     responseFormat: REACTION_RESPONSE_FORMAT,
+    reasoningEffort: REACTION_REASONING_EFFORT,
   };
   // 空数组与缺省一样：键都不出现，否则「有没有图」这件事会在下游多出一种形状
   if (input.images !== undefined && input.images.length > 0) request.images = input.images;

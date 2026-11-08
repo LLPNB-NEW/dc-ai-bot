@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { REACTION_RESPONSE_FORMAT, buildReactionRequest, normalizeReactions } from '../src/core/chat/reaction';
+import {
+  REACTION_REASONING_EFFORT,
+  REACTION_RESPONSE_FORMAT,
+  buildReactionRequest,
+  normalizeReactions,
+} from '../src/core/chat/reaction';
 import { DEFAULT_REACTION_GUIDE } from '../src/core/chat/reaction-guide';
 import { DEFAULT_REACTION_TEMPLATE } from '../src/core/chat/reaction-template';
 import type { ReactionModelConfig } from '../src/core/types';
@@ -72,5 +77,12 @@ describe('buildReactionRequest 的结构化输出契约', () => {
         },
       },
     });
+  });
+
+  it('思考档位钉最低：挑表情不值得深想，缺了这个键模型会按自己的默认档位想几秒', () => {
+    const req = request();
+
+    expect(req.reasoningEffort).toBe(REACTION_REASONING_EFFORT);
+    expect(req.reasoningEffort).toBe('low');
   });
 });
