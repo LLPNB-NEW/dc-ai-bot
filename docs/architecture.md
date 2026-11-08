@@ -5264,3 +5264,50 @@ export interface ToolCallDelta {
 - 测试：`test/chat.reaction-json.test.ts:76` 起一例断言 `req.reasoningEffort` 就是那个常量且等于 `'low'`。
 - 已知不变：它只影响「多快想完」，不影响贴不贴、贴几个、结构化输出；关掉（把常量删掉）就退回默认档位，别的都不动。
 
+## 69. draw-image-2：模型自己画图，并把图作为附件发出去（2026-11-09）
+
+### 69.1 缺的是什么
+
+- 中继早就有生图端点（`POST /v1/images/generations`，见 `docs/hosting.md` §15.5），但 bot 侧没有入口：模型只能写字，要图就得人去别处画。
+- 想要的形态不是斜杠命令，而是预设里一句「想画就调 `draw_image`」：模型自己判断该画，画出来那一轮只发图、不配台词，历史里留一个占位让下一轮知道自己画过。
+
+### 69.2 决定
+
+- **工具门控照抄 `story_reply`**：`drawToolsFor(preset)`（`src/core/chat/image-tool.ts:43`）只在 `preset.indexOf('draw_image') !== -1` 时返回工具；预设没写的频道，请求体里连这条工具都不存在，形状与加这层之前逐字相同。
+- **只在上下文工具模式装配**：`src/core/chat/service.ts:1288` `const drawTools = contextToolMode ? drawToolsFor(promptParts.before + '\n' + promptParts.after) : [];`，同时进普通 `tools`（`:1289`）与 `contextToolFields`（`:1346-1347` 的 `tools: [...buildContextTools(contextBody), ...drawTools]`、`toolChoice: 'auto'`）。
+- **命中就清空正文**：`:1475` `drawPrompt = drawPromptOf(first.calls);`，非 `null` 时 `raw = ''`（`:1476`）；同时让 §59 的「空回补交付」不再问一次（`:1480` 的条件带 `drawPrompt === null`）——工具已经交付了这一轮，再问一次只会多花一次调用。
+- **生图用当前这把 Key 的 baseUrl**：`requestImage()`（`src/core/chat/image-tool.ts:86`）→ `POST {baseUrl}/images/generations`，body 固定 `{model:'gemini-3.1-flash-image', prompt, n:1, response_format:'b64_json'}`，超时 `AbortSignal.timeout(IMAGE_TIMEOUT_MS=180_000)`（`:21`）。认 `data[0].b64_json`，也认 `data[0].url` 的 `data:` 形式；三种失败各有错误码：`IMAGE_HTTP`（`:107`，带状态与 200 字原文）、`IMAGE_BAD_JSON`（`:112`）、`IMAGE_MISSING`（`:121`，上游 2xx 但没图）。
+- **发图与文字分两步**：`src/workers/gateway/engine.ts:744` 取 `result.image`；`:747` 只发图那轮正文留空串，不再补「（模型没有返回内容）」；`:759` `imageOnly = image !== undefined && text.trim() === ''`；`:761-769` 调 `channel.sendFile` 发附件，文件名按 mime 取 `image.png` / `image.webp` / `image.jpg`（Discord 靠后缀预览）；`:776` 只有「图没发出去且没正文」才补一句「（图片没发出去）」；`:778` `if (!imageOnly || !imageSent)` 才建那条文字消息。
+- **空回判据放行图片**：`:1546` `if (raw.trim() === '' && imageResult === undefined)` 才算空回；生成失败不吞（`:1541` `图片生成失败 key=…`），宁可这轮按空回重试，也不放一张空白图出去。
+
+### 69.3 代码地图
+
+- 新文件 `src/core/chat/image-tool.ts`：`DRAW_TOOL_NAME='draw_image'`（`:9`）、`IMAGE_MODEL_NAME='gemini-3.1-flash-image'`（`:15`）、`IMAGE_PROMPT_MAX_CHARS=8000`（`:18`）、`drawTool()`（`:25`，参数只有必填 `prompt`）、`drawToolsFor()`（`:43`）、`drawPromptOf()`（`:48`，没调/参数坏/空串都返回 `null`，超长截断）、`requestImage()`（`:86`）。
+- 服务层 `src/core/chat/service.ts`：`:1471-1476` 分流、`:1521-1542` 调 `requestImage` 并打 `图片回复 model=… key=… prompt=<字数> bytes=… ms=…` 或 `图片生成失败`、`:1546` 空回、`:1634` `result.image`、`:1650` 落库 `[图片]`、`:1670` 成功日志尾部的 `image=1`、`:1681` 没有正文就不问表情模型。
+- 发送侧：`src/workers/gateway/engine.ts:734` `TurnResult.image`、`:757-777` 附件发送、`:772` `发送图片失败：`；`src/workers/gateway/channel-rest.ts:32` 的 `sendFile?(channelId, bytes, file?)` 与 `:80` 的实现；`src/workers/discord/rest.ts:120` `ChannelFileShape`、`:131` `sendChannelFile(…, shape?)`。
+- 门牌：`GATEWAY_BUILD = 'draw-image-2'`（`src/workers/gateway/engine.ts:131`，`test/gateway.node.test.ts:229` 同步）。
+- 线上预设：主频道 `123456789012345678` 的 48 段里位置 37 是「画图」段，正文逐字「用户让你画画、要一张图、说「画个…」时，调用 draw_image 把画面写清楚（主体、动作、场景、风格）；图会直接发出去，这一轮不用再写正文。」——没这段的频道请求体逐字不变。
+
+### 69.4 测试与门槛
+
+- `test/chat.image-tool.test.ts` 7 例：预设没写 `draw_image` 不返回工具；写了只返回一条且参数只有 `prompt`；`drawPromptOf` 取参数、坏 JSON/空串/没调返回 `null`、超长截断；`requestImage` 认 `b64_json`、认 `data:` URL、非 2xx 抛 `IMAGE_HTTP`、缺字段抛 `IMAGE_MISSING`。
+- `test/chat.service.test.ts` 末尾「画图工具（draw_image）」2 例：上下文工具模式命中后正文为空、`result.image` 有字节、落库是 `[图片]`；普通模式不装配这条工具。
+- 门槛：`npm run typecheck` 0；`npm test` **88 文件 1640 例全过**；`npm run test:node` **118 通过 +1 跳过**（9 文件）。
+- 线上（2026-11-08T19:25Z）：`图片回复 model=gemini-3.1-flash-image key=pgl prompt=233 bytes=778925 ms=9949`，紧跟 `回复成功 … len=0 image=1 ms=22773 key=pgl mode=context`；Discord 附件 `image.jpg` 778,925 B、1408×768、`image/jpeg`，正文为空；`messages` 落 `[图片]`。
+
+### 69.5 第一次真机暴露的事：并发 batch 把整轮拖成了失败
+
+- 现象：19:12Z 那轮四张图都生成成功（四次 `图片回复`），整轮却是 `ALL_PROVIDERS_FAILED`；`messages` 一行没落；容器反复打 `[log] 写日志失败：cannot start a transaction within a transaction`。
+- 真因：`src/node/db/sqlite.ts` 的 `batch()` 在同一条连接上直接 `db.exec('BEGIN')`；回复落库（`conversations.append` → `db.batch`）与 `runtime_logs` 写入（`createLogStore().append` → `db.batch`）是两个独立异步批，交错时后一个 BEGIN 撞上前一个未提交的事务，`append` 抛错 → 本轮判失败 → 换下一把 Key 重问 → 图作废再画一张。
+- 改法：`batch()` 串成一条 promise 链——`const next = batchChain.then(run, run); batchChain = next.catch(() => undefined); return next;`。一次只开一个事务，前一批失败不阻塞后一批，错误仍回到各自调用方。
+- 回归测试 `test/node.sqlite.test.ts`：两个 `db.batch` 并发（`Promise.all`）后两行都在；再让前一批故意失败（`NOT NULL`），`Promise.allSettled` 里前者 rejected、后者 fulfilled、表里三行齐全。
+- 教训：日志里那句 `cannot start a transaction within a transaction` 是「两个写入批撞车」的指纹，不是日志系统自己的毛病；看到它先查谁绕开了 `batch()` 的排队顺序。
+
+### 69.6 边界
+
+- 只在上下文工具模式发这个工具；普通模式的工具调用不解析，预设里写 `draw_image` 也不会画。
+- 生图模型名写死在 `IMAGE_MODEL_NAME`；换供应商要么改常量，要么在那一侧做模型别名（中继默认就是 `gemini-3.1-flash-image`）。
+- 失败按空回重试：`MAX_ATTEMPTS` 之内每次都会真的再生成一张图（时间与额度都花掉）；它只保证「不发空白图」，不保证这轮一定有图。
+- `n` 固定 1；Discord 附件上限 10 MB，线上实测 0.7–0.8 MB；prompt 超过 8000 字截断后续画，不判整轮失败。
+- 图片不参与下一轮的多模态理解：历史里只有 `[图片]` 占位，模型记得自己画过，但看不到那张图。
+- 没有新迁移，迁移总数仍是 31。

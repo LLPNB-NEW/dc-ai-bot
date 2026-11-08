@@ -2429,7 +2429,7 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 6. **最坏情况不影响正文**：该路请求 400 时 `askReactionModel()` 只 warn，正文照发，只是这轮没有表情；查到 `表情模型没有可用 Key` 或 provider 报错时按这条判断，不要以为主链坏了。
 7. **回退**：镜像回退 `prompt-copy-1` 即回到「只靠提示词自觉回一行」；没有新迁移（总数仍是 31），中继那份 `response_format` 支持留着不影响旧客户端（不带该字段的请求逐字不变）。
 
-## 47. reaction-effort-1（现版）的判据：表情那条支线真的按最低档在跑
+## 47. reaction-effort-1 的判据：表情那条支线真的按最低档在跑
 
 1. **中继日志成对出现**：每条表情请求前应有 `思考档位 effort=low level=1 wire=[null,null,null,1]`，紧跟其后的 `生成参数` 末位就是 `[null,null,null,1]`；只有 `生成参数` 没有 `思考档位` 那行，说明这条请求没带 `reasoning_effort`（多半是这条路又被换成了别的调用）。
 2. **`include_thoughts` 必须没有**：同一行 `生成参数` 里下标 16 若是 `[1,…]`，模型会把思考摘要写进正文（开头出现「Calculating…」这类元叙述）——看到就叫回滚。
@@ -2438,3 +2438,16 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 5. **主链没被牵动**：`回复成功 … ms=` 与正文长度跟改前同一量级；这条改动只碰表情请求的构造，主链 `reasoningEffort` 早就在 `src/core/chat/service.ts:1429` 写死。
 6. **回退**：镜像回退 `reaction-json-1` 即回到「表情支线按模型默认档位想」；没有新迁移（总数仍是 31），中继不需要动（`thinking_config` 支持留着，不带 `reasoning_effort` 的请求逐字不变）。
 
+## 48. draw-image-2 的判据：画图那一轮真的把图发出去了
+
+1. **先看门牌**：容器启动回执应有 `build=draw-image-2`（`[gateway] node host started build=draw-image-2`、`[node] listening on :8787 … build=draw-image-2`）；仍是 `draw-image-1` 说明包没换。
+2. **预设里有画图那段**：`sudo sqlite3 /opt/dc-ai-bot/data/dc-ai-bot.sqlite3 "select position,name,enabled from prompt_segments where scope='channel' and scope_id='123456789012345678' and content like '%draw_image%'"` 应返回位置 37 的「画图」段且 `enabled=1`；没有这行就完全不会下发工具。
+3. **请求里带了这条工具**：bot 那一轮的中继日志里，`工具定义按上游协议下发 … names=` 应含 `draw_image`（客户端没声明就该没有——这是门控，不是默认能力）。
+4. **模型真的调了**：同一轮出现 `响应形状 … calls=draw_image(<参数长度>)`；只回文本没调工具，是模型判断这轮不该画，别当成故障。
+5. **生图那行**：bot 日志 `图片回复 model=gemini-3.1-flash-image key=<Key 名> prompt=<字数> bytes=<字节> ms=<毫秒>`；`key=` 必须是 baseUrl 真有 `/images/generations` 的那把（线上是 `pgl` / `pg`，`ds` 一定 404）。
+6. **成功行长这样**：紧跟一条 `回复成功 … len=0 image=1 …`；`len>0` 说明模型除了画图还写了台词（允许，只是不再是「只发图」）。
+7. **库里留占位**：`messages` 最后一行应是该频道的 assistant 行、正文 `[图片]`、长度 4。
+8. **Discord 侧核对**：那条消息 `content` 为空，附件 `filename:"image.jpg"` / `content_type:"image/jpeg"` / 尺寸非零；带台词时文字与附件在同一条或相邻两条都算正常。
+9. **失败怎么分辨**：`图片生成失败 key=ds IMAGE_HTTP 404:` = 那把 Key 的 baseUrl 没有生图端点；`upstream_http_error 上游 HTTP 502` = 上游瞬时抖动，重发一次；`IMAGE_MISSING` = 上游 2xx 但响应里没有图；`IMAGE_BAD_JSON` = 响应不是 JSON（多半是网关错误页）。
+10. **事务指纹**：日志里出现 `cannot start a transaction within a transaction` 或「图都生成了却整轮 `ALL_PROVIDERS_FAILED`、`messages` 一行不落」，先查是不是又有人绕过 `batch()` 的排队并发写——§69.5 就是这一条。
+11. **回退**：镜像回退 `reaction-effort-1` 即回到「模型不会画图」，预设里那段 `draw_image` 会变成一句无人执行的说明；没有新迁移（总数仍是 31），中继的生图端点留着不影响不带该工具的请求。
