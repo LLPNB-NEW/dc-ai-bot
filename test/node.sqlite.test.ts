@@ -121,6 +121,26 @@ describe('createSqliteDatabase 复刻 D1 语义', () => {
     const db = createSqliteDatabase(newDbPath());
     expect(await db.batch([])).toEqual([]);
   });
+
+  it('并发 batch 排队执行：两次同时进来不会撞「cannot start a transaction within a transaction」', async () => {
+    const db = createSqliteDatabase(newDbPath());
+    await db.prepare('CREATE TABLE q (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT NOT NULL)').run();
+    const insert = db.prepare('INSERT INTO q (v) VALUES (?)');
+    // 线上就是回复落库与 runtime_logs 写入同时发生：两次 batch 各自的 BEGIN 不能重叠
+    await Promise.all([db.batch([insert.bind('a')]), db.batch([insert.bind('b')])]);
+    const { results } = await db.prepare('SELECT v FROM q ORDER BY id ASC').all<{ v: string }>();
+    expect(results.map((row) => row.v)).toEqual(['a', 'b']);
+    // 前一批失败不能把后一批也带停：链上只传完成信号，错误仍归各自调用方
+    const notNull = db.prepare('INSERT INTO q (v) VALUES (?)');
+    const [failed, ok] = await Promise.allSettled([
+      db.batch([notNull.bind(null)]),
+      db.batch([insert.bind('c')]),
+    ]);
+    expect(failed.status).toBe('rejected');
+    expect(ok.status).toBe('fulfilled');
+    const after = await db.prepare('SELECT v FROM q ORDER BY id ASC').all<{ v: string }>();
+    expect(after.results.map((row) => row.v)).toEqual(['a', 'b', 'c']);
+  });
 });
 
 async function migratedDatabase(): Promise<SqlDatabase> {

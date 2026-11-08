@@ -67,29 +67,40 @@ export function createSqliteDatabase(filePath: string): SqlDatabase {
     };
   }
 
+  // 一个连接上同时只能开一个事务：回复落库与日志写入是两条独立的异步批，交错进来时后一个的 BEGIN
+  // 会撞上前一个还没提交的事务（SQLite 报 cannot start a transaction within a transaction），
+  // 线上表现就是消息写不进去、回复被当成失败重问。这里把 batch 串成一条链，事务一次只开一个。
+  let batchChain: Promise<unknown> = Promise.resolve();
+
   return {
     prepare(query: string): SqlStatement {
       return createStatement(query, []);
     },
 
-    async batch(statements: SqlStatement[]): Promise<unknown> {
-      if (statements.length === 0) return [];
+    batch(statements: SqlStatement[]): Promise<unknown> {
+      if (statements.length === 0) return Promise.resolve([]);
       // 批量写（messages/emoji_descriptions/runtime_logs）靠整批一个事务：任何一条失败，
       // 前面已经执行的那几条必须一起消失，否则表里留下半批数据。
-      db.exec('BEGIN');
-      try {
-        const results: unknown[] = [];
-        for (const statement of statements) results.push(await statement.run());
-        db.exec('COMMIT');
-        return results;
-      } catch (error: unknown) {
+      const run = async (): Promise<unknown> => {
+        db.exec('BEGIN');
         try {
-          db.exec('ROLLBACK');
-        } catch {
-          // 回滚自己也失败说明事务已经不在，能报给调用方的还是原始那条错
+          const results: unknown[] = [];
+          for (const statement of statements) results.push(await statement.run());
+          db.exec('COMMIT');
+          return results;
+        } catch (error: unknown) {
+          try {
+            db.exec('ROLLBACK');
+          } catch {
+            // 回滚自己也失败说明事务已经不在，能报给调用方的还是原始那条错
+          }
+          throw error;
         }
-        throw error;
-      }
+      };
+      // 前一批失败也要继续排队：链上只传「已经跑完」这个信号，错误仍由各自的 next 抛给调用方
+      const next = batchChain.then(run, run);
+      batchChain = next.catch(() => undefined);
+      return next;
     },
   };
 }
