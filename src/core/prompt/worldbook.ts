@@ -1,0 +1,387 @@
+import type { Scope, ScopedKey } from '../types';
+
+/** 一条世界书条目：把酒馆几套字段名收敛成一份，触发与拼接只认这里的形状 */
+export interface WorldEntry {
+  id: number;
+  name: string;
+  keys: string[];
+  secondaryKeys: string[];
+  content: string;
+  enabled: boolean;
+  constant: boolean;
+  selective: boolean;
+  selectiveLogic: 'andAny' | 'andAll' | 'notAny' | 'notAll';
+  order: number;
+  caseSensitive: boolean;
+  wholeWords: boolean;
+}
+
+/** 被跳过的条目：导入回执要说清「为什么这条没进来」，否则用户会以为书丢了 */
+export interface WorldIgnored {
+  identifier: string;
+  name: string;
+  reason: 'empty' | 'noKeys' | 'disabled';
+}
+
+/** 一本世界书：ignored 与 warnings 分开记，因为前者是条目的取舍、后者是格式的毛病 */
+export interface WorldBook {
+  name: string;
+  entries: WorldEntry[];
+  ignored: WorldIgnored[];
+  warnings: string[];
+}
+
+export type WorldBookParseResult =
+  | { ok: true; value: WorldBook }
+  | { ok: false; error: 'BAD_WORLDBOOK' | 'NO_WORLD_ENTRIES'; detail: string };
+
+/** 落库后的一本世界书：entryCount 冗余存一份，列表页不必反序列化整本书 */
+export interface WorldBookRecord extends ScopedKey {
+  name: string;
+  book: WorldBook;
+  entryCount: number;
+  importedAt: string;
+}
+
+export interface WorldBookStore {
+  get(key: ScopedKey): Promise<WorldBookRecord | null>;
+  list(): Promise<WorldBookRecord[]>;
+  put(input: { scope: Scope; scopeId: string; name: string; book: WorldBook }): Promise<WorldBookRecord>;
+  remove(key: ScopedKey): Promise<void>;
+}
+
+export const WORLD_SCAN_DEPTH_DEFAULT = 4;
+export const WORLD_SCAN_DEPTH_MAX = 20;
+export const WORLD_BLOCK_MAX_CHARS = 4000;
+
+/** 本仓库其余解析器的同款判据：数组也是 object，必须先排掉 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+/**
+ * 取第一个「有值」的同义字段：显式的空数组也算有值，
+ * 因为「keys: []」在酒馆里就是「这条没有关键词」，不能退回用 key 字段。
+ */
+function pickField(entry: Record<string, unknown>, names: readonly string[]): unknown {
+  for (const name of names) {
+    const value = entry[name];
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+}
+
+/**
+ * 关键词列表：数组照抄；单个字符串按逗号拆，
+ * 因为有些导出把多关键词塞进一个逗号串，不拆就等于整串当一个关键词。
+ */
+function readKeys(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    const keys: string[] = [];
+    for (const item of value) {
+      const text = readText(item).trim();
+      if (text !== '') keys.push(text);
+    }
+    return keys;
+  }
+  const text = readText(value);
+  if (text.trim() === '') return [];
+  return text
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item !== '');
+}
+
+/** 数字容忍字符串，因为部分导出把 insertion_order 写成 "100" */
+function readNumber(value: unknown, fallback: number): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+/** 布尔除了 true/false 还要认 0/1：酒馆导出里两种写法都出现过 */
+function readFlag(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (value === 1) return true;
+  if (value === 0) return false;
+  return fallback;
+}
+
+/**
+ * ST 口径数字码：0=AND ANY、1=NOT ALL、2=NOT ANY、3=AND ALL。
+ * 用 switch 而不是映射表查表，是为了让未知值落到 andAny 时一眼能看出来。
+ */
+function readSelectiveLogic(value: unknown): WorldEntry['selectiveLogic'] {
+  switch (value) {
+    case 0:
+      return 'andAny';
+    case 1:
+      return 'notAll';
+    case 2:
+      return 'notAny';
+    case 3:
+      return 'andAll';
+    default:
+      break;
+  }
+  const text = readText(value).trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (text === 'notall') return 'notAll';
+  if (text === 'notany') return 'notAny';
+  if (text === 'andall') return 'andAll';
+  return 'andAny';
+}
+
+interface EntrySlot {
+  entry: unknown;
+  /** 对象形式下用原键，回落数字下标：ignored.ignored 的 identifier 要能和原书对上号 */
+  identifier: string;
+  id: number;
+}
+
+interface EntrySource {
+  slots: EntrySlot[];
+  name: string;
+}
+
+/** 角色卡 V2 把书塞在 data.character_book；也兼容非 V2 直接放顶层的 character_book */
+function pickCharacterBook(raw: Record<string, unknown>): Record<string, unknown> | null {
+  const data = raw['data'];
+  if (isRecord(data) && isRecord(data['character_book'])) return data['character_book'];
+  if (isRecord(raw['character_book'])) return raw['character_book'];
+  return null;
+}
+
+function readEntrySlots(container: unknown): EntrySlot[] | null {
+  if (Array.isArray(container)) {
+    return container.map((entry, index) => ({ entry, identifier: String(index), id: index }));
+  }
+  if (isRecord(container)) {
+    return Object.keys(container).map((key, index) => {
+      const numeric = Number(key);
+      const id = Number.isInteger(numeric) && numeric >= 0 ? numeric : index;
+      return { entry: container[key], identifier: key, id };
+    });
+  }
+  return null;
+}
+
+/** 书名的优先级：顶层 name > data.name > character_book.name > '' */
+function readBookName(raw: Record<string, unknown>, characterBook: Record<string, unknown> | null): string {
+  const data = raw['data'];
+  const candidates = [
+    raw['name'],
+    isRecord(data) ? data['name'] : undefined,
+    characterBook === null ? undefined : characterBook['name'],
+  ];
+  for (const candidate of candidates) {
+    const text = readText(candidate).trim();
+    if (text !== '') return text;
+  }
+  return '';
+}
+
+function collectSource(raw: unknown): EntrySource | null {
+  if (Array.isArray(raw)) {
+    const slots = readEntrySlots(raw);
+    return slots === null ? null : { slots, name: '' };
+  }
+  if (!isRecord(raw)) return null;
+  const characterBook = pickCharacterBook(raw);
+  const container = characterBook === null ? raw['entries'] : characterBook['entries'];
+  const slots = readEntrySlots(container);
+  if (slots === null) return null;
+  return { slots, name: readBookName(raw, characterBook) };
+}
+
+/**
+ * 解析世界书。三种输入（ST 导出的 entries 对象/数组、角色卡 V2、顶层数组）在这里合流，
+ * 之后的触发与拼接只面对 WorldEntry 一种形状。
+ */
+export function parseWorldBook(raw: unknown): WorldBookParseResult {
+  const source = collectSource(raw);
+  if (source === null) {
+    return { ok: false, error: 'BAD_WORLDBOOK', detail: '找不到世界书条目（既没有 entries，也不是可识别的角色卡）' };
+  }
+
+  const entries: WorldEntry[] = [];
+  const ignored: WorldIgnored[] = [];
+  const warnings: string[] = [];
+  let skipped = 0;
+
+  for (const slot of source.slots) {
+    if (!isRecord(slot.entry)) {
+      skipped += 1;
+      continue;
+    }
+    const item = slot.entry;
+    const keys = readKeys(pickField(item, ['keys', 'key', 'keywords']));
+    const secondaryKeys = readKeys(pickField(item, ['secondaryKeys', 'keysecondary', 'secondary_keys']));
+    const content = readText(pickField(item, ['content', 'text']));
+    const comment = readText(pickField(item, ['comment', 'name', 'title'])).trim();
+    const name = comment !== '' ? comment : keys.length > 0 ? keys[0] : '条目 ' + String(slot.id);
+    // 酒馆有两个相反口径的开关：enabled=false 与 disable=true 都表示停用，任一成立就不得参与触发
+    const enabled = readFlag(item['enabled'], true) && !readFlag(item['disable'], false);
+    const constant = readFlag(item['constant'], false);
+
+    // 空正文的条目留着只会让 system 多出一串空行，先判它：这是三条里最没救的一条
+    if (content.trim() === '') {
+      ignored.push({ identifier: slot.identifier, name, reason: 'empty' });
+      continue;
+    }
+    if (!enabled) {
+      ignored.push({ identifier: slot.identifier, name, reason: 'disabled' });
+      continue;
+    }
+    // constant 条目本来就不靠关键词触发，没 keys 也照样每轮插
+    if (keys.length === 0 && !constant) {
+      ignored.push({ identifier: slot.identifier, name, reason: 'noKeys' });
+      continue;
+    }
+
+    entries.push({
+      id: slot.id,
+      name,
+      keys,
+      secondaryKeys,
+      content,
+      enabled,
+      constant,
+      selective: readFlag(item['selective'], false),
+      selectiveLogic: readSelectiveLogic(item['selectiveLogic']),
+      order: readNumber(pickField(item, ['insertion_order', 'order', 'priority']), 100),
+      caseSensitive: readFlag(pickField(item, ['caseSensitive', 'case_sensitive']), false),
+      wholeWords: readFlag(pickField(item, ['matchWholeWords', 'match_whole_words']), false),
+    });
+  }
+
+  if (skipped > 0) warnings.push('已跳过 ' + String(skipped) + ' 个非对象条目');
+  if (entries.length === 0) {
+    return {
+      ok: false,
+      error: 'NO_WORLD_ENTRIES',
+      detail: '世界书里没有可用条目（跳过 ' + String(ignored.length) + ' 条）',
+    };
+  }
+  return { ok: true, value: { name: source.name, entries, ignored, warnings } };
+}
+
+/**
+ * 三层整本覆盖：只要某层有书就用它，不做条目级合并——
+ * 半本上层 + 半本下层拼出来的设定没人能预期。
+ */
+export function resolveWorldBook(
+  channel: WorldBookRecord | null,
+  guild: WorldBookRecord | null,
+  global: WorldBookRecord | null,
+): WorldBookRecord | null {
+  if (channel !== null) return channel;
+  if (guild !== null) return guild;
+  return global;
+}
+
+function isWordChar(char: string): boolean {
+  return /[0-9A-Za-z_]/.test(char);
+}
+
+/**
+ * 整词匹配自己找边界，而不是拼 \b 正则：
+ * 关键词里带空格、标点或中文时 \b 的语义就失效了，这里只认「两侧不是字母数字下划线」。
+ */
+function containsKeyword(haystack: string, keyword: string, wholeWords: boolean): boolean {
+  if (keyword === '') return false;
+  if (!wholeWords) return haystack.includes(keyword);
+  let from = 0;
+  for (;;) {
+    const at = haystack.indexOf(keyword, from);
+    if (at === -1) return false;
+    const before = at === 0 ? '' : haystack.charAt(at - 1);
+    const after = haystack.charAt(at + keyword.length);
+    const leftOk = before === '' || !isWordChar(before);
+    const rightOk = after === '' || !isWordChar(after);
+    if (leftOk && rightOk) return true;
+    from = at + 1;
+  }
+}
+
+function clampScanDepth(scanDepth: number | undefined): number {
+  if (scanDepth === undefined || !Number.isFinite(scanDepth)) return WORLD_SCAN_DEPTH_DEFAULT;
+  const floored = Math.floor(scanDepth);
+  if (floored < 1) return 1;
+  if (floored > WORLD_SCAN_DEPTH_MAX) return WORLD_SCAN_DEPTH_MAX;
+  return floored;
+}
+
+/** 扫窗口只看每层正文：把多段拼一起判「任一命中」，与 ST 的扫描缓冲同义 */
+function buildScanWindow(messages: readonly { role: string; content: string }[], depth: number): string {
+  const start = Math.max(0, messages.length - depth);
+  return messages
+    .slice(start)
+    .map((message) => message.content)
+    .join('\n');
+}
+
+function matchesEntry(entry: WorldEntry, window: string): boolean {
+  // constant 每轮必插，连窗口都不必看
+  if (entry.constant) return true;
+  const haystack = entry.caseSensitive ? window : window.toLowerCase();
+  const hit = (key: string): boolean => containsKeyword(haystack, entry.caseSensitive ? key : key.toLowerCase(), entry.wholeWords);
+  if (!entry.keys.some(hit)) return false;
+  if (!entry.selective || entry.secondaryKeys.length === 0) return true;
+  const secondary = entry.secondaryKeys.map(hit);
+  switch (entry.selectiveLogic) {
+    case 'andAll':
+      return secondary.every((value) => value);
+    case 'notAny':
+      return secondary.every((value) => !value);
+    case 'notAll':
+      return secondary.some((value) => !value);
+    default:
+      return secondary.some((value) => value);
+  }
+}
+
+/**
+ * 选条目：先按 order/id 排好再逐条按预算收，超预算的整条跳过而不是截断——
+ * 截一半的设定比没有更容易把模型带偏。
+ */
+export function selectWorldEntries(
+  book: WorldBook,
+  messages: readonly { role: string; content: string }[],
+  scanDepth: number = WORLD_SCAN_DEPTH_DEFAULT,
+): WorldEntry[] {
+  const depth = clampScanDepth(scanDepth);
+  const window = buildScanWindow(messages, depth);
+  const hits = book.entries.filter((entry) => matchesEntry(entry, window));
+  hits.sort((left, right) => left.order - right.order || left.id - right.id);
+
+  const picked: WorldEntry[] = [];
+  let used = 0;
+  for (const entry of hits) {
+    const body = entry.content.trim();
+    if (body === '') continue;
+    // 连接符也算预算：保证 buildWorldBlock 的产物本身不越过上限
+    const cost = picked.length === 0 ? body.length : body.length + 2;
+    if (used + cost > WORLD_BLOCK_MAX_CHARS) continue;
+    used += cost;
+    picked.push(entry);
+  }
+  return picked;
+}
+
+/** 合成一段 system 文本；标题行让模型知道这一段的出处，也让排障时一眼能认出 */
+export function buildWorldBlock(entries: readonly WorldEntry[]): string {
+  const bodies: string[] = [];
+  for (const entry of entries) {
+    const body = entry.content.trim();
+    if (body !== '') bodies.push(body);
+  }
+  if (bodies.length === 0) return '';
+  return '【世界书】\n' + bodies.join('\n\n');
+}

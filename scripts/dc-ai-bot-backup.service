@@ -1,0 +1,12 @@
+[Unit]
+Description=每日把 dc-ai-bot 数据库快照备份到 Google Drive（rclone）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/dc-ai-bot/bin/backup-to-drive.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=30min

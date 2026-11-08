@@ -1,0 +1,8 @@
+[Unit]
+Description=Keep Cloudflare A record in sync with this instance public IPv4
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/dc-ai-bot/bin/update-dns.sh

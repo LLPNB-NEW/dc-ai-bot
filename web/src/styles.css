@@ -1,0 +1,1755 @@
+:root {
+  color-scheme: dark;
+  --bg: #0e1117;
+  --panel: #161b24;
+  --panel-2: #1d2431;
+  --border: #2a3243;
+  --text: #e6ebf5;
+  --muted: #94a1b8;
+  --accent: #4c8dff;
+  --danger: #ff6b6b;
+  --ok: #3ddc97;
+  font-family: 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+
+h2 {
+  font-size: 15px;
+  margin: 0 0 10px;
+  color: var(--text);
+}
+
+code, .chip, .chips li {
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+
+.centered {
+  display: flex;
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--muted);
+}
+
+.app {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.brand {
+  font-size: 15px;
+  white-space: nowrap;
+}
+
+.tabs {
+  display: flex;
+  gap: 6px;
+  flex: 1;
+}
+
+.tab {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+
+.content {
+  padding: 20px;
+  flex: 1;
+}
+
+.page {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.card.login {
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.field > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+textarea {
+  resize: vertical;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  line-height: 1.5;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+input:disabled {
+  opacity: 0.5;
+}
+
+button {
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06101f;
+  font-weight: 600;
+}
+
+button.ghost {
+  background: transparent;
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: #4a2b33;
+  background: transparent;
+}
+
+button.small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+button.link {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  padding: 0;
+  text-align: left;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0 0 10px;
+}
+
+.error {
+  color: var(--danger);
+  margin: 0 0 8px;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.ok {
+  color: var(--ok);
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.result {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 18px;
+}
+
+.chips li {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.items {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.items > li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.items.keys > li {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.items .hint {
+  margin: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.key-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.badge {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.ok-badge {
+  color: var(--ok);
+  border-color: #2c6a53;
+}
+
+fieldset.fallbacks {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+fieldset.fallbacks legend {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 6px;
+}
+
+.row.fallback {
+  align-items: center;
+}
+
+.row.fallback select {
+  width: 160px;
+  flex: none;
+}
+
+.page.logs {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* §21.6 表情页：只有一个表单卡片，单列更接近阅读宽度 */
+.page.reaction {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 全局 input 是 width:100%，开关需要把原生复选框收回正常尺寸 */
+.row.checkbox {
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.row.checkbox input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  flex: none;
+}
+
+/* §23.6 认表情：已认描述清单，名字与表情 ID 用等宽字体，长描述整行换行 */
+.emoji-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.emoji-list > li {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  overflow-wrap: anywhere;
+}
+
+.emoji-list .emoji-head {
+  color: var(--accent);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+}
+
+/* §24.8 表情别名：一行 = 别名输入 + 目标表情下拉 + 添加按钮，按钮与输入框底边对齐 */
+.row.alias {
+  align-items: flex-end;
+}
+
+.row.alias .actions {
+  margin: 0 0 12px;
+  flex: none;
+}
+
+.emoji-list.alias-list > li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.alias-list .alias-name {
+  font-weight: 600;
+}
+
+.alias-list button {
+  margin-left: auto;
+}
+
+.logs-head,
+.backup-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.logs-head h2,
+.backup-head h2 {
+  margin: 0;
+}
+
+.logs-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
+.logs-filter {
+  flex: none;
+  width: 160px;
+  margin-bottom: 0;
+}
+
+.logs-toolbar .actions {
+  margin-top: 0;
+}
+
+.logs-view {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  height: 60vh;
+  min-height: 320px;
+  overflow: auto;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.log-line {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  width: max-content;
+  min-width: 100%;
+}
+
+.log-time {
+  flex: none;
+  color: var(--muted);
+}
+
+.log-level {
+  flex: none;
+  font-weight: 600;
+}
+
+.log-level.info {
+  color: var(--accent);
+}
+
+.log-level.warn {
+  color: #f0b429;
+}
+
+.log-level.error {
+  color: var(--danger);
+}
+
+.log-scope {
+  flex: none;
+  color: var(--muted);
+}
+
+.log-message {
+  flex: 1;
+  min-width: 0;
+  white-space: pre;
+}
+
+/* §25.6 摘要页：单列（读取/列表 → 正文表单 → 最近消息）比双列更接近操作顺序 */
+.page.summary {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 顶部两个 ID 输入 + 读取按钮：按钮与输入框底边对齐（.field 自带 12px 下边距） */
+.row.summary-key {
+  align-items: flex-end;
+}
+
+.row.summary-key .actions {
+  margin: 0 0 12px;
+  flex: none;
+}
+
+/* 全局 input 是 width:100%，覆盖楼层是短数字，按 .row.checkbox 的思路单独收窄 */
+.field.floor {
+  flex: none;
+  width: 180px;
+}
+
+.row.summary-floor {
+  align-items: flex-end;
+}
+
+/* 摘要是全表列表：两个 badge 不参与压缩，更新时间交给 .hint 省略号收尾 */
+.summary-list .badge {
+  flex: none;
+}
+
+/* 最近消息行：发言人固定在楼层号后面，正文用 .hint 的省略号 */
+.summary-messages .summary-author {
+  flex: none;
+  min-width: 60px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 摘要列表最后一段是更新时间，靠右才像一列 */
+.summary-list .hint {
+  text-align: right;
+}
+
+/* §25.8 选择性补记的命中样本：一行一条，等宽小字 + 换行，长正文不把卡片撑宽 */
+.backfill-samples {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.backfill-samples li {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* §26.6 记忆页：左列（读取 + 参数表单）与右列（已保存频道）并排，窄屏交给 .page 的断点落成单列 */
+.memory-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 顶部两个 ID 输入 + 读取按钮：按钮与输入框底边对齐（.field 自带 12px 下边距） */
+.row.memory-key {
+  align-items: flex-end;
+}
+
+.row.memory-key .actions {
+  margin: 0 0 12px;
+  flex: none;
+}
+
+/* 全局 input 是 width:100%，窗口/阈值/预算三个条数都是短数字，按 .field.floor 的思路收窄 */
+.row.memory-numbers {
+  align-items: flex-end;
+}
+
+.field.memory-number {
+  flex: none;
+  width: 260px;
+}
+
+/* 已保存列表：三个 badge 不参与压缩，更新时间交给 .hint 省略号收尾并靠右 */
+.memory-list .badge {
+  flex: none;
+}
+
+.memory-list .hint {
+  text-align: right;
+}
+
+/* §11 提示词页：多段编辑器，每段一张卡片，边框/底色与 .items > li 同一套 */
+.segment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+
+.segment {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 12px;
+}
+
+/* 段头：序号 + 角色 badge 在左，上移 / 下移 / 删除靠右 */
+.segment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.segment-title {
+  font-weight: 600;
+}
+
+.segment-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* 全局 input/select 是 width:100%，角色与位置是定长下拉，按 .field.floor 的思路收窄 */
+.field.segment-role {
+  flex: none;
+  width: 190px;
+}
+
+.field.segment-placement {
+  flex: none;
+  width: 220px;
+}
+
+/* 段内最后一行是启用勾选：.row.checkbox 自带 12px 下边距，卡片里贴底就够了 */
+.segment .row.checkbox {
+  margin-bottom: 0;
+}
+
+/* 门牌 reaction-guide-1 贴表情提示词：三层共用一个编辑框，已配置的层在下面按 scope 列出来 */
+.emoji-list.guide-list > li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* scope+scopeId 是键，用等宽字体和表情页其他键（.emoji-head）对齐 */
+.guide-list .guide-scope {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.guide-list .guide-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 载入 / 删除靠右，跟 .alias-list button 同一套摆法 */
+.guide-list .guide-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* 门牌 reaction-template-1 表情素材模板：占位符说明按行列在编辑框下面，一层一行说明它展开成什么 */
+.template-hint-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.template-hint-list code {
+  color: var(--accent);
+  margin-right: 6px;
+}
+
+/* 已配置的层：一层一行，scope 用等宽字体跟提示词卡片对齐 */
+.emoji-list.template-list > li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.template-list .template-scope {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+/* 占位符个数 + 更新时间：太长时让它自己换行，别把右边的按钮挤出去 */
+.template-list .template-time {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.template-list .template-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* 门牌 backup-ui-1 备份页：单列才排得下「状态 → 按钮 → 说明」这条阅读顺序 */
+.page.backup {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 状态行：标签定宽，值自己换行，再长的时间串和远端路径也不会把卡片撑宽 */
+.row.backup-row {
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.backup-label {
+  flex: none;
+  width: 84px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backup-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 文件名是 20261028T130737Z 这类机器可读的串，等宽字体才好逐段比对 */
+.backup-file {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+}
+
+/* 失败原因要抢眼：红字之外再加一层底色边框，和普通的提示行区分开 */
+.error.backup-failure {
+  background: #2a1a1f;
+  border: 1px solid #4a2b33;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+/* 排队中 / 正在备份两枚徽标：与 .ok-badge 同一套写法，只换颜色 */
+.warn-badge {
+  color: #f0b429;
+  border-color: #6a552c;
+}
+
+.accent-badge {
+  color: var(--accent);
+  border-color: #2c4a6a;
+}
+
+.danger-badge {
+  color: var(--danger);
+  border-color: #4a2b33;
+}
+
+/* 门牌 fake-stream-2 回复页：单列才排得下「层 / ID / 值 / 时间」这条阅读顺序 */
+.page.reply {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.page.reply .reply-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.page.reply .reply-list > li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+/* 层名定宽：三行的 ID / 值 / 时间才落在同一条竖线上 */
+.page.reply .reply-scope {
+  flex: none;
+  width: 132px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* 频道 ID 有 19 位，等宽字体才逐位对得上，窄屏也不把行撑宽 */
+.page.reply .reply-id {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.page.reply .reply-value {
+  flex: none;
+  margin-left: auto;
+}
+
+.page.reply .reply-time {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 门牌 vision-2 识图开关：全局 input 是 width:100%，单选要收回正常尺寸才排得成一行 */
+.page.reply .vision-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  align-items: center;
+}
+
+.page.reply .vision-toggle label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.page.reply .vision-toggle input[type='radio'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  flex: none;
+}
+
+/* 值列只放「开 / 关」，同样左推到底，与上面那张列表的 ID / 时间对齐 */
+.page.reply .vision-value {
+  flex: none;
+  margin-left: auto;
+  color: var(--ok);
+}
+
+/* 关是「什么都没发生」，别用绿色示意成正常状态 */
+.page.reply .vision-value.off {
+  color: var(--muted);
+}
+
+/* 门牌 pg-errors-1 故障页：六列排得下才用单列整宽，窄屏靠横向滚动，不把原因挤成一列字 */
+.page.errors {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.page.errors .errors-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.page.errors .errors-head h2 {
+  margin: 0;
+}
+
+.page.errors .errors-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* 计数挨着按钮那一排，放得下就停在最右，放不下就换行，别挤掉按钮 */
+.page.errors .errors-summary {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 取不到报错是新出现的一块提示，和逐字报错分开描边，免得看成某一条报错的内容 */
+.page.errors .errors-alert {
+  border: 1px solid #4a2b33;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: rgba(255, 107, 107, 0.06);
+}
+
+.page.errors .errors-alert .error {
+  margin: 0 0 4px;
+}
+
+.page.errors .errors-alert .hint {
+  margin: 0 0 8px;
+}
+
+.page.errors .errors-alert .actions {
+  margin: 0;
+}
+
+/* 0 条是好事：用绿色描边说清楚「没有坏消息」，别画成一块报错 */
+.page.errors .errors-empty {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 20px 16px;
+  text-align: center;
+  color: var(--ok);
+}
+
+.page.errors .errors-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.page.errors table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.page.errors th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  white-space: nowrap;
+}
+
+.page.errors td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.page.errors tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* 时间只到秒：定宽等宽数字，扫一列时间的竖向边缘才不跳 */
+.page.errors .errors-time {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.page.errors .errors-code {
+  white-space: nowrap;
+}
+
+.page.errors .errors-status {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border: 1px solid #4a2b33;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--danger);
+}
+
+.page.errors .errors-code-text {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.page.errors .errors-model,
+.page.errors .errors-key {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.page.errors .errors-duration {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 原因是原文：允许换行，长 URL / 长模型名也不把表格撑破 */
+.page.errors .errors-message {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 320px;
+  max-width: 620px;
+}
+
+/* 复制按钮靠右压在这一格顶上：原因再长也不用滚回去找它 */
+.page.errors .errors-message button {
+  align-self: flex-end;
+}
+
+.page.errors .errors-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.page.errors .errors-request {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* 门牌 voice-1 语音回复：全局 input 是 width:100%，单选框要收回正常尺寸才排得成一行 */
+.page.reply .voice-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  align-items: center;
+}
+
+.page.reply .voice-modes label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.page.reply .voice-modes input[type='radio'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  flex: none;
+}
+
+/* 「TTS 没配」是前提条件而不是报错：只加一道竖线提醒，别套用 .error 那种红字 */
+.page.reply .voice-warn {
+  border-left: 2px solid #4a2b33;
+  padding-left: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* 值列比「次数」长得多：允许换行并靠右，不把时间列挤出窄屏 */
+.page.reply .voice-value {
+  min-width: 0;
+  margin-left: auto;
+  text-align: right;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+/* 门牌 prompt-scope-1 内置默认提示词：页面顶部一张通栏卡片，两块编辑区上下排，排在原有卡片之前 */
+.page.prompts .prompt-defaults {
+  grid-column: 1 / -1;
+}
+
+/* 两张模板各占一块，边框/底色与 .segment 同一套，读起来是「同一张卡片里的两条配置」 */
+.page.prompts .prompt-default {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.page.prompts .prompt-default:last-child {
+  margin-bottom: 0;
+}
+
+/* 块头：标题在左，状态（已保存于 / 未配置）靠右 */
+.page.prompts .prompt-default-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.page.prompts .prompt-default-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.page.prompts .prompt-default-state {
+  margin-left: auto;
+  flex: none;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.page.prompts .prompt-default-state.on {
+  color: var(--ok);
+}
+
+/* 默认文本通常比一段提示词长，给个下限，别让两个编辑框挤成一条 */
+.page.prompts .prompt-default textarea {
+  min-height: 160px;
+}
+
+/* 变量 chips：每个变量一个按钮，点了插到光标处；末尾跟字数计数 */
+.page.prompts .prompt-vars {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.page.prompts .prompt-vars .hint {
+  margin: 0;
+}
+
+.page.prompts .prompt-var {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  color: var(--accent);
+  background: var(--panel);
+}
+
+.page.prompts .prompt-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+
+/* 超长：后端必拒，计数先变红，保存按钮同时锁住 */
+.page.prompts .prompt-count.over {
+  color: var(--danger);
+}
+
+
+
+/* 门牌 prompt-scope-1 分层选择：一行三个 tab，已配置的层带一个绿点与「已配置 N 个」 */
+.page.prompts .prompt-default-layers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.page.prompts .prompt-default-layer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.page.prompts .prompt-default-layer.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--panel);
+}
+
+/* 已配置小圆点：没有配置时只剩一圈暗灰，扫一眼就知道哪层动过 */
+.page.prompts .prompt-default-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.page.prompts .prompt-default-dot.on {
+  background: var(--ok);
+}
+
+.page.prompts .prompt-default-layer-state {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 频道 / 服务器层要先说清存在哪一条：ID 输入 + 已配置过的 ID chips */
+.page.prompts .prompt-default-target {
+  margin-bottom: 12px;
+}
+
+.page.prompts .prompt-target-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.page.prompts .prompt-target-chips .hint {
+  margin: 0;
+}
+
+.page.prompts .prompt-target-chip {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  color: var(--muted);
+  background: transparent;
+}
+
+.page.prompts .prompt-target-chip.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--panel);
+}
+
+/* 块头里的目标标识（channel:123 / global）：等宽、不换行、别把状态行挤走 */
+.page.prompts .prompt-default-target-badge {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  color: var(--muted);
+}
+
+/* 块头现在有标题 + 目标 + 状态三段，窄屏让它换行而不是把状态挤掉 */
+.page.prompts .prompt-default-head {
+  flex-wrap: wrap;
+}
+
+/* 预览块：比正文更暗的底色，读起来是「结果」而不是「输入」 */
+.page.prompts .prompt-preview {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  margin: 0 0 10px;
+  overflow: hidden;
+}
+
+.page.prompts .prompt-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.page.prompts .prompt-preview-state {
+  margin-left: auto;
+  flex: none;
+}
+
+/* 未知占位符：后端必拒，用警示橙而不是报错红——正文本身还能继续改 */
+.page.prompts .prompt-preview-warn {
+  margin: 0;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #241d0c;
+  color: #f0b429;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+/* 渲染结果与代码内置原文共用：保留换行与缩进，但不许把卡片撑宽 */
+.page.prompts .prompt-preview-body,
+.page.prompts .prompt-code-text {
+  margin: 0;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.page.prompts .prompt-preview-body {
+  min-height: 40px;
+}
+
+/* 只读代码内置区：虚线分隔 + 灰标题，别让人误以为上面两块是同一类可编辑内容 */
+.page.prompts .prompt-code-defaults {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.page.prompts .prompt-code-defaults h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.page.prompts .prompt-code-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.page.prompts .prompt-code-default {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 10px;
+}
+
+.page.prompts .prompt-code-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+}
+
+.page.prompts .prompt-code-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* 示例值一行可能很长：等宽小字靠右，空间不够就换行 */
+.page.prompts .prompt-sample-vars {
+  margin-left: auto;
+  min-width: 0;
+  font-size: 11px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.page.prompts .prompt-code-default .prompt-code-text {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+/* 门牌 sillytavern-import 酒馆预设导入：工具条 + 内联面板通栏，排在页面最前面，和保存按钮同一套 .primary */
+.page.prompts .prompt-import {
+  grid-column: 1 / -1;
+}
+
+.page.prompts .prompt-import-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.page.prompts .prompt-import-bar .hint {
+  margin: 0;
+}
+
+.page.prompts .prompt-import-bar button {
+  flex: none;
+  margin-left: auto;
+}
+
+.page.prompts .prompt-import-panel {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 16px;
+}
+
+.page.prompts .prompt-import-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 8px;
+}
+
+.page.prompts .prompt-import-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* 文件名可能很长：等宽小字靠右，一行放不下就换行 */
+.page.prompts .prompt-import-file {
+  margin-left: auto;
+  min-width: 0;
+  font-size: 12px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.page.prompts .prompt-import-result {
+  margin: 0 0 10px;
+}
+
+/* 深度注入这一行要能一眼看到：段表里没有它，写失败时用户得自己去另一张卡片补 */
+.page.prompts .prompt-import-moved {
+  margin: 0 0 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.page.prompts .prompt-import-ignored,
+.page.prompts .prompt-import-warnings {
+  margin: 0 0 6px;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* 世界书卡片：只是这一张卡片需要的骨架——选中层标题行 + 条目摘要表，别的一律沿用现有类名 */
+.page.prompts .worldbook-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+
+.page.prompts .worldbook-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* 整本几百条时不把页面拉长：表自己滚，表头跟住 */
+.page.prompts .worldbook-table-wrap {
+  max-height: 320px;
+  margin: 6px 0 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.page.prompts .worldbook-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.page.prompts .worldbook-table th,
+.page.prompts .worldbook-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.page.prompts .worldbook-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.page.prompts .worldbook-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* 停用条目照实显示成灰掉的一条：不让人误以为它还在参与装配 */
+.page.prompts .worldbook-row.off td {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.page.prompts .worldbook-keys {
+  max-width: 340px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.page.prompts .worldbook-chars {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 门牌 prompt-copy-1 语音页：接口卡片在上、语音回复与朗读语气卡片在下；单列才排得下「层 / ID / 值 / 时间」 */
+.page.voice {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 下面几条是 .page.reply 那套列表 / 单选的同款规则：搬过来的卡片换了页面，样式不能跟着丢 */
+.page.voice .reply-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.page.voice .reply-list > li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+/* 层名定宽：三行的 ID / 值 / 时间才落在同一条竖线上 */
+.page.voice .reply-scope {
+  flex: none;
+  width: 132px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* 频道 ID 有 19 位，等宽字体才逐位对得上，窄屏也不把行撑宽 */
+.page.voice .reply-id {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.page.voice .reply-value {
+  flex: none;
+  margin-left: auto;
+}
+
+.page.voice .reply-time {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 全局 input 是 width:100%，单选框要收回正常尺寸才排得成一行 */
+.page.voice .voice-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  align-items: center;
+}
+
+.page.voice .voice-modes label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.page.voice .voice-modes input[type='radio'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  flex: none;
+}
+
+/* 导演模式是本行第三个字段：.row 默认不换行而 .field 是 flex:1，窄屏三列会挤成几个字，这里允许换行并给字段一个宽度下限 */
+.page.voice .voice-row {
+  flex-wrap: wrap;
+}
+
+.page.voice .voice-row .field {
+  flex: 1 1 180px;
+}
+
+/* 「TTS 没配」是前提条件而不是报错：只加一道竖线提醒，别套用 .error 那种红字 */
+.page.voice .voice-warn {
+  border-left: 2px solid #4a2b33;
+  padding-left: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* 值列比「次数」长得多：允许换行并靠右，不把时间列挤出窄屏 */
+.page.voice .voice-value {
+  min-width: 0;
+  margin-left: auto;
+  text-align: right;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+/* 状态条：未配置用中性灰 + 暗红竖边提醒，已配置才给绿色 */
+.page.voice .tts-status {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #4a2b33;
+  border-left-width: 2px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.page.voice .tts-status.on {
+  border-color: #24422f;
+  color: var(--ok);
+}
+
+/* 试听的字节数 / 耗时是排查数据：等宽小字，别和成功提示抢注意力；「实际发送」靠换行另起一行 */
+.page.voice .tts-preview {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-line;
+}
+
+/* 选中的方言不认语速（MiMo）：输入框压暗，只做提示，不禁用也不报错 */
+.page.voice .voice-speed-off input {
+  opacity: 0.55;
+}
+
+/* 情绪判断模型：可选的一组字段，用一道左侧竖线跟主接口字段分开，不另起一张卡 */
+.page.voice .tts-judge {
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+
+.page.voice .tts-judge-title {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* 语气原文是多行中文：基础 textarea 是等宽字体，这里换回正文，并给个能看见三行的初始高度 */
+.page.voice .tts-style-textarea {
+  min-height: 88px;
+  font-family: inherit;
+  line-height: 1.6;
+}
+
+/* 语气示例 chips：贴在输入框上方，点一下填进当前层；样式跟提示词页的目标 chips 同一套 */
+.page.voice .tts-style-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.page.voice .tts-style-chips .hint {
+  margin: 0;
+}
+
+.page.voice .tts-style-chip {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  color: var(--muted);
+  background: transparent;
+}
+
+.page.voice .tts-style-chip:hover:enabled {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 计数贴右、说明留左：两行文字共用一个基线，窄屏时说明先换行 */
+.page.voice .tts-style-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.page.voice .tts-style-meta .hint {
+  min-width: 0;
+  margin: 0;
+}
+
+.page.voice .tts-style-count {
+  flex: none;
+  margin-left: auto;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 超长：后端必拒，计数先变红，保存按钮同时锁住 */
+.page.voice .tts-style-count.over {
+  color: var(--danger);
+}
+
+/* 语气列表：层 / ID / 摘要 / 时间 / 删除；摘要占剩余宽度并允许断词，别把时间列挤出窄屏 */
+.page.voice .tts-style-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.page.voice .tts-style-list > li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.page.voice .tts-style-excerpt {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+/* 逐条删除是行内动作：用 button.link 的样子，只收一下字号，别抢过正文 */
+.page.voice .tts-style-remove {
+  flex: none;
+  font-size: 12px;
+}
+
+.page.voice .tts-style-remove:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* §62 历史页：时间占固定宽度，正文吃掉剩余空间并允许断词，删除按钮永远贴在最右 */
+.page.history .history-list > li {
+  align-items: baseline;
+}
+
+.page.history .history-time {
+  flex: none;
+  font-size: 12px;
+}
+
+.page.history .history-content {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.page.history .history-list button.danger {
+  flex: none;
+  font-size: 12px;
+}

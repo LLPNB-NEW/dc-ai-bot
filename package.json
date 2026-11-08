@@ -1,0 +1,42 @@
+{
+  "name": "dc-ai-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "test:node": "vitest run --config vitest.node.config.ts",
+    "test:all": "vitest run && vitest run --config vitest.node.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:web": "tsc -p web/tsconfig.json --noEmit",
+    "build:web": "vite build --config web/vite.config.ts",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "register": "node scripts/register-commands.mjs",
+    "build:node": "node scripts/build-node.mjs",
+    "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
+    "start": "node dist/server.mjs",
+    "docker:up": "docker compose up -d --build",
+    "docker:logs": "docker compose logs -f --tail=100"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.17",
+    "hono": "^4.13.13"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
+    "@cloudflare/workers-types": "^5.20261024.1",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "esbuild": "^0.28.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.152.0"
+  }
+}

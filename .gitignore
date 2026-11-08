@@ -1,0 +1,32 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.cf-token
+cf-token
+*.local
+tail.log
+# wrangler tail 抓取产物
+_tail*.log
+tail*.log
+# 一次性排查产物（D1 查询结果、清理前备份）
+_q*.json
+_fake_stamp*.json
+_fake_stamp*.log
+# 自托管部署件：密钥、SQLite 数据文件、真实环境变量都不入库
+keys/
+data/
+*.sqlite3
+.env
+dist/server.mjs
+
+# 本地保存的 Cloudflare API token，绝不入库（cf.token 是 2026-10-27 roll 之后的新值）
+cf-token.bak
+cf.token
+*.cf-token
+
+# 本机保存的 rclone / Google Drive 授权 token（含 refresh token，等同密码）
+rclone.token
+# 本机跑 rclone authorize 时解压出来的二进制目录
+rclone-v*/
+.session-repair/

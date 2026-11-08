@@ -1,0 +1,35 @@
+name = "dc-ai-bot"
+main = "src/workers/index.ts"
+compatibility_date = "2025-09-01"
+
+# 同一个 Worker 既跑 API 又托管 SPA：dist/web 由 `npm run build:web` 产出（M5）
+[assets]
+directory = "./dist/web"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dc-ai-bot"
+# 换成你自己的：wrangler d1 list 里的 database_id
+database_id = "<D1_DATABASE_ID>"
+migrations_dir = "migrations"
+
+# 常驻 Gateway 连接：一个 Durable Object 持有一条到 Discord 的 WebSocket，
+# 只为了让 bot 在成员列表里显示在线；斜杠命令仍然走 /interactions 的 HTTP 路径。
+[[durable_objects.bindings]]
+name = "GATEWAY_PRESENCE"
+class_name = "GatewayPresence"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GatewayPresence"]
+
+# 每 5 分钟把 DO 唤醒做一次保活自检（心跳本身由 DO 自己的 storage.setAlarm 驱动）
+[triggers]
+crons = ["*/5 * * * *"]
+
+# 敏感值不走配置文件：本地放进 .dev.vars（见 .dev.vars.example），
+# 线上用 `wrangler secret put <NAME>` 注入，不写进本文件、不入库：
+#   DISCORD_BOT_TOKEN / DISCORD_PUBLIC_KEY / DISCORD_APPLICATION_ID
+#   ADMIN_PASSWORD / SESSION_SECRET / KEY_ENCRYPTION_SECRET

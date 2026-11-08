@@ -1,0 +1,13 @@
+# 构建上下文瘦身：t3.micro 上把 .wrangler 的 SQLite 状态和本地 node_modules 搬进 daemon 纯属浪费
+node_modules
+dist
+.wrangler
+.git
+.env
+.dev.vars
+data
+keys
+*.sqlite3
+*.log
+docs
+README.md

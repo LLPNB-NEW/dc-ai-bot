@@ -1,0 +1,45 @@
+# 公网只有 Caddy 一个入口：它占 80/443 做 TLS 终结，bot 的 8787 不出 compose 默认网络
+services:
+  bot:
+    build:
+      context: .
+    env_file: .env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    # 宿主 1 GiB：Caddy 占 192m，bot 封顶 640m，越界让容器重启而不是拖垮整机
+    mem_limit: 640m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - bot
+    environment:
+      # 只传 Caddyfile 用得到的两个变量，其余 secret 不必进第三方镜像
+      SITE_ADDRESS: ${SITE_ADDRESS:-example.com}
+      ACME_EMAIL: ${ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+      # HTTP/3 走 UDP；不开放只是退化成 HTTP/2，不影响访问
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    mem_limit: 192m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:

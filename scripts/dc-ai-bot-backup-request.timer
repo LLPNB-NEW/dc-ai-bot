@@ -1,0 +1,10 @@
+[Unit]
+Description=每分钟驱动 dc-ai-bot-backup-request.service 看一眼手动备份请求
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
