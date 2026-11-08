@@ -5311,14 +5311,14 @@ export interface ToolCallDelta {
 - `n` 固定 1；Discord 附件上限 10 MB，线上实测 0.7–0.8 MB；prompt 超过 8000 字截断后续画，不判整轮失败。
 - 图片不参与下一轮的多模态理解：历史里只有 `[图片]` 占位，模型记得自己画过，但看不到那张图。
 - 没有新迁移，迁移总数仍是 31。
-### 69.7 画完还得说话：台词放进同一个调用（draw-image-3，2026-11-09）
+### 69.7 图先出、正文由主模型再写一次（draw-image-4，2026-11-09）
 
-- 之前那一版是「只发图、不配台词」：模型调 `draw_image` 后 `raw` 被清空，正文为空，引擎连那条文字消息都不建。现在要求图与台词都出现，但仍然**不增加一次模型调用**。
-- 做法：`draw_image` 的参数从只有一个 `prompt` 变成 `prompt` + `say`（两个都必填，台词上限 `DRAW_LINE_MAX_CHARS=600`）。模型在同一次工具调用里把画面和台词一起交出来，`drawLineOf()`（`src/core/chat/image-tool.ts:76`）取 `say` 当本轮正文；`say` 缺省、空串、参数坏就退回「模型自己写的正文」，再没有才是纯图（旧行为留成兜底）。
-- 发送顺序不变：先 `sendFile` 发图，再走原来的 `chunkMessage` / `stream.finish` 发台词（`src/workers/gateway/engine.ts:761-778`）。台词照常吃 `resolveInlineEmojis`、@ 提及与 1900 字切段；图与台词是相邻两条消息。
-- 落库：有台词存台词（`src/core/chat/service.ts:1650`），没有才存 `[图片]`。
-- 线上预设同步：主频道 `123456789012345678` 的第 37 段正文换成「…调用 draw_image：prompt 写清画面（主体、动作、场景、风格），say 写你画完之后要对用户说的那一两句（符合人设，不要描述画图过程）；图会先发出去，say 会接着作为这一轮的正文。」——只动这一段，其它段一个字没改。
-- 工具说明一并改了：`drawTool().function.description` 明说「图会先发出去、say 接着作为这一轮的正文」，免得模型按旧文案只交画面。
-- 测试：`test/chat.image-tool.test.ts` 新增 `drawLineOf` 的取值/缺省/超长三例，`required` 断言改成 `['prompt','say']`；`test/chat.service.test.ts` 新增「模型给了 say」一例（正文是台词、历史存台词、工具定义里 `say` 必填）。门槛：`npm run typecheck` 0；`npm test` **88 文件 1643 例全过**；`npm run test:node` **118 通过 +1 跳过**。
-- 门牌：`GATEWAY_BUILD = 'draw-image-3'`（`src/workers/gateway/engine.ts:132`，`test/gateway.node.test.ts:229` 同步）。
-- 边界：台词由模型自己写，我们只截断不润色；图与台词不是同一条消息（Discord 附件上传这里没有 caption），要合成一条得另做 multipart 的 `content`；纯图兜底仍在，模型偶尔不给 `say` 时这轮就只有图。
+- 上一版把台词塞进 `draw_image` 的参数（`say`），等于从工具参数里抠一行当正文。线上要的是「4a 生成正文」——和普通回合走同一条生成路径，而不是让工具参数兼职正文。
+- 做法：`draw_image` 参数回到只有 `prompt`。图生成成功、这一轮又没有正文时，再发一次请求（`src/core/chat/service.ts:1545` 起）：`system: contextReplySystem`（整份上下文搬进 system）、`messages` 末尾追加一句「（刚刚按这个画面画了一张图，已经发给用户了：<prompt>）请照设定写这一轮的正文，可以自然提到这张图，但不要描述画图过程，也不要说自己调用了工具。」、工具只留 `replyOnlyTools()`（`story_reply`）、`reasoningEffort: 'low'`——和 §59 的「补交付」是同一套形状。
+- 同一次响应里模型已经交了 `story_reply`（或写了正文）时 `raw` 非空，直接用它，不再多问一次；只有「只调了 draw_image」才付这次额外调用。
+- 代价与边界：画图那一轮多一次模型调用（实测 5–15 秒）；第二段仍可能交白卷，那就退化成只发图（`raw=''` 但 `imageResult` 有值，空回判据放行），历史存 `[图片]`。
+- 发送顺序不变：先 `sendFile` 发图，再走 `chunkMessage` / `stream.finish` 发正文（`src/workers/gateway/engine.ts:761-778`）；正文照常吃 `resolveInlineEmojis`、@ 提及与 1900 字切段。
+- 线上预设同步：主频道 `123456789012345678` 第 37 段正文改成「…调用 draw_image 把画面写清楚（主体、动作、场景、风格）；图会先发出去，然后你再照设定写这一轮的正文。」——只动这一段。
+- 工具说明：`drawTool().function.description` 改成「画一张图并直接发到频道……图画好之后会再让你写这一轮的正文。」，与第二段请求对上。
+- 测试：`test/chat.service.test.ts` 新增「图画好之后正文由主模型再写一次」一例（第一段只调 draw_image、第二段交 story_reply；断言两段请求、第二段只带 `story_reply`、末尾消息带「已经发给用户了」、历史存正文）；「反复只调 draw_image」那一例仍覆盖纯图兜底。`test/chat.image-tool.test.ts` 的 `required` 断言回到 `['prompt']`。
+- 门牌：`GATEWAY_BUILD = 'draw-image-4'`（`src/workers/gateway/engine.ts:132`，`test/gateway.node.test.ts:229` 同步）。
