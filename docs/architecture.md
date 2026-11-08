@@ -5236,7 +5236,7 @@ export interface ToolCallDelta {
 
 ### 68.3 代码地图
 
-- 门牌：`GATEWAY_BUILD = 'reaction-json-1'`（`src/workers/gateway/engine.ts:131`），`test/gateway.node.test.ts:229` 同步。
+- 门牌：`GATEWAY_BUILD = 'reaction-effort-1'`（`src/workers/gateway/engine.ts:131`），`test/gateway.node.test.ts:229` 同步；上一版 `reaction-json-1` 只差 §68.6 那一处。
 - 契约：`REACTION_RESPONSE_FORMAT`（`src/core/chat/reaction.ts:43`）、`jsonReactionValues()`（`:265`）、`normalizeReactions()`（`:289` 的 `for (const line of jsonReactionValues(raw) ?? raw.split('\n'))`）。
 - 线缆：`src/core/providers/openai-compat.ts:92` `...(req.responseFormat === undefined ? {} : { response_format: req.responseFormat })`，位置在 `tools` / `tool_choice` 之后、`stream` 之前。
 - 中继：`data/deploy-pg-relay/server.js:1297` `generationConfigOf()`（数组加长到下标 8）、`:1318` `structuredFormatOf()`、`:2467` 请求入口日志 `结构化输出 type=…`。
@@ -5246,7 +5246,7 @@ export interface ToolCallDelta {
 - `test/chat.reaction-json.test.ts` 6 例：JSON 取出表情且 @目标照旧切分；顶层字符串与对象里唯一字符串值也认；缩进成多行的 JSON 整段解析、不按换行切碎；JSON 里的 NONE 与文本 NONE 同义；形态错乱回落到旧文本解析；`LlmRequest` 带 `json_schema`（name 固定、`reaction` 必填）。
 - `test/providers.openai.test.ts:726` 起 3 例：`responseFormat` 原样进 body 且排在 `stream` 之前、旧字段顺序不动；`json_object` 同样透传；不给该字段时键不出现（含流式走同一个 `bodyOf`）。
 - `test/providers.anthropic.test.ts:433`：不发 `response_format`、不报错。
-- 门槛：`npm run typecheck` 0；`npm test` **87 文件 1630 例**。
+- 门槛：`npm run typecheck` 0；`npm test` **87 文件 1631 例**（§68.6 那条 +1）。
 - 中继侧实测（pg-relay 容器内 `data/_probe_json1.mjs` / `_probe_json2.mjs`）：`json_object` 200 / 6.2s / `{"emoji":":laugh:"}`；`json_schema` 200 / 4.4s / 同形状；**与函数工具同发** 200 且照旧回 `tool_calls`（两者不冲突，工具优先）。
 
 ### 68.5 边界
@@ -5255,4 +5255,12 @@ export interface ToolCallDelta {
 - `json_schema.strict` 在上游没有对应槽，传了也不生效；schema 这里只用「一个必填字符串」，没引入 `additionalProperties` 之类没验过的关键字。
 - 结构化输出不改变「贴不贴」的决策语义，也不改贴表情链路与正文表情文案（那两条各归 `§28` 与 `§66`）。
 - 没有新迁移，迁移总数仍是 31；中继那份改动只影响 `response_format` 这一条通道，不带该字段的请求逐字不变。
+
+### 68.6 这条支线也钉最低思考档
+
+- 改了什么：`buildReactionRequest` 的 `LlmRequest` 多一个 `reasoningEffort: REACTION_REASONING_EFFORT`（`src/core/chat/reaction.ts:43` 起的常量 = `'low'`，赋值在 `:190` 附近）。挑一个表情不需要推导，线上实测那一路 7.0s 里大半是默认档位的思考时间。
+- 为什么钉在这里而不是后台可配：`reasoning_effort` 已经是这条链路的固定契约（主链在 `src/core/chat/service.ts:1429` 也写死 `low`），再多一个后台开关只会多一种「配错就慢」的分支。
+- 生效路径：`src/core/providers/openai-compat.ts:78` 把 `reasoningEffort` 发成 `reasoning_effort` → 中继 `thinkingConfigOf()`（`data/deploy-pg-relay/server.js:1323`）翻成 `wire[3][16] = [null,null,null,1]`，日志 `思考档位 effort=low level=1 …`。Anthropic 通道不列这个键，静默忽略。
+- 测试：`test/chat.reaction-json.test.ts:76` 起一例断言 `req.reasoningEffort` 就是那个常量且等于 `'low'`。
+- 已知不变：它只影响「多快想完」，不影响贴不贴、贴几个、结构化输出；关掉（把常量删掉）就退回默认档位，别的都不动。
 

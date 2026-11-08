@@ -2419,7 +2419,7 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 7. **库只看两张表**：`SELECT scope, scope_id, position, name, enabled, placement FROM prompt_segments WHERE scope = '<to>' AND scope_id = '<toId>' ORDER BY position` 与 `SELECT scope, scope_id, temperature, max_tokens FROM prompts WHERE scope = '<to>' AND scope_id = '<toId>'`；复制后目标层是显式配置，之后不再跟随上层。
 8. **回退**：镜像回退 `emoji-body-2` 即回到「只能逐层导入」；没有新迁移（总数仍是 31），旧版不认这张卡片也不认这个接口，库结构不变。
 
-## 46. reaction-json-1（现版）的判据：表情选择真的走了结构化输出
+## 46. reaction-json-1 的判据：表情选择真的走了结构化输出
 
 1. **中继日志先看一行**：每轮回复之后那条小模型请求前应有 `结构化输出 type=json_schema`，紧接着 `生成参数 [null,null,null,null,null,null,null,"application/json",[6,…,["reaction",[1]]],["reaction"]]`——下标 8 里就是这份 schema；没有 `结构化输出` 这行说明请求根本没带 `response_format`（可能是表情模型被换成了不发这个键的供应商）。
 2. **返回的是 JSON**：同一条请求的 `响应形状 text=…` 里，正文应是 `{"reaction":":名字:"}` 或 `{"reaction":"NONE"}` 这种一行 JSON，而不是裸的 `:名字:`。
@@ -2428,4 +2428,13 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 5. **兜底仍然有效**：把表情模型临时换成会回纯文本的通道（或不发 `response_format` 的供应商），`value` 仍应从 `：名字：` 里取出来——解析顺序是 JSON 前缀尝试，失败才逐行读文本。
 6. **最坏情况不影响正文**：该路请求 400 时 `askReactionModel()` 只 warn，正文照发，只是这轮没有表情；查到 `表情模型没有可用 Key` 或 provider 报错时按这条判断，不要以为主链坏了。
 7. **回退**：镜像回退 `prompt-copy-1` 即回到「只靠提示词自觉回一行」；没有新迁移（总数仍是 31），中继那份 `response_format` 支持留着不影响旧客户端（不带该字段的请求逐字不变）。
+
+## 47. reaction-effort-1（现版）的判据：表情那条支线真的按最低档在跑
+
+1. **中继日志成对出现**：每条表情请求前应有 `思考档位 effort=low level=1 wire=[null,null,null,1]`，紧跟其后的 `生成参数` 末位就是 `[null,null,null,1]`；只有 `生成参数` 没有 `思考档位` 那行，说明这条请求没带 `reasoning_effort`（多半是这条路又被换成了别的调用）。
+2. **`include_thoughts` 必须没有**：同一行 `生成参数` 里下标 16 若是 `[1,…]`，模型会把思考摘要写进正文（开头出现「Calculating…」这类元叙述）——看到就叫回滚。
+3. **耗时对比**：`runtime_logs` 里 `表情选择 … ms=` 改前常见 6–8s，改后应普遍低一截；数字变小但 `value=` 仍能取到表情名，说明这条支线只是想得快了，没有丢判断。
+4. **结构化输出不受影响**：同一轮 `响应形状 text=` 仍应是一行 JSON（`{"reaction":":名字:"}` 或 `{"reaction":"NONE"}`），不是裸文本。
+5. **主链没被牵动**：`回复成功 … ms=` 与正文长度跟改前同一量级；这条改动只碰表情请求的构造，主链 `reasoningEffort` 早就在 `src/core/chat/service.ts:1429` 写死。
+6. **回退**：镜像回退 `reaction-json-1` 即回到「表情支线按模型默认档位想」；没有新迁移（总数仍是 31），中继不需要动（`thinking_config` 支持留着，不带 `reasoning_effort` 的请求逐字不变）。
 
