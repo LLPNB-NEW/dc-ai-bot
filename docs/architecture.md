@@ -5220,3 +5220,39 @@ export interface ToolCallDelta {
 - 复制写的是目标层的显式配置：此后它不随上层变化，这正是「搬过来」的语义。
 - 没有新迁移，迁移总数仍是 31。
 
+## 68. reaction-json-1：表情选择改用结构化输出（2026-11-09）
+
+### 68.1 缺的是什么
+
+- 表情选择一直是「问一次小模型，让它只回一行」：请求由 `buildReactionRequest()`（`src/core/chat/reaction.ts:155`）拼成 system 指路 + 一段素材，解析靠 `normalizeReactions()` 逐行读、剥引号与反引号、按 `表情|目标` 去重。模型偶尔多写一句解释或缩进成多行，全靠这套兜底吞下去。
+- 中继这版起支持 `response_format`（`structuredFormatOf()`，`data/deploy-pg-relay/server.js:1318` 把它翻成 `wire[3]` 的下标 7 `response_mime_type` 与下标 8 `response_schema`），于是「只填一个字段」可以由协议约束，而不是靠提示词自觉。
+
+### 68.2 决定
+
+- **请求侧恒带 schema，不做开关**：`REACTION_RESPONSE_FORMAT`（`src/core/chat/reaction.ts:43`）固定 `{type:'json_schema', json_schema:{name:'reaction_choice', schema:{type:'object', properties:{reaction:{type:'string'}}, required:['reaction']}}}`，`buildReactionRequest()` 每次都给 `responseFormat`（`:188`）。这样线上只有一种请求形状，出问题只看一处。
+- **解析侧 JSON 只当前缀尝试**：`jsonReactionValues()`（`src/core/chat/reaction.ts:265`）先整段 `JSON.parse`，认三种形状——`{"reaction":"…"}`、顶层字符串、对象里唯一的字符串值；认不出返回 `null`，`normalizeReactions()`（`:289`）退回原来的逐行解析。理由：Anthropic 通道不发这个键、旧提示词也只保证纯文本，兜底必须留在 JSON 之后才不丢任何旧语义。
+- **JSON 也要能表达「不贴」**：`{"reaction":"NONE"}` 与文本 `NONE` 同义（`NO_REACTION` 集合照旧判），多出来的说明字段不该把答案顶成「形状不认识」。
+- **类型是可选的**：`LlmResponseFormat` 与 `LlmRequest.responseFormat`（`src/core/types.ts:263`、`:305`）；`openai-compat` 适配器条件展开（`src/core/providers/openai-compat.ts:92`），缺省时请求体逐字节不变；`anthropic` 不列该字段，静默忽略、不报错。
+
+### 68.3 代码地图
+
+- 门牌：`GATEWAY_BUILD = 'reaction-json-1'`（`src/workers/gateway/engine.ts:131`），`test/gateway.node.test.ts:229` 同步。
+- 契约：`REACTION_RESPONSE_FORMAT`（`src/core/chat/reaction.ts:43`）、`jsonReactionValues()`（`:265`）、`normalizeReactions()`（`:289` 的 `for (const line of jsonReactionValues(raw) ?? raw.split('\n'))`）。
+- 线缆：`src/core/providers/openai-compat.ts:92` `...(req.responseFormat === undefined ? {} : { response_format: req.responseFormat })`，位置在 `tools` / `tool_choice` 之后、`stream` 之前。
+- 中继：`data/deploy-pg-relay/server.js:1297` `generationConfigOf()`（数组加长到下标 8）、`:1318` `structuredFormatOf()`、`:2467` 请求入口日志 `结构化输出 type=…`。
+
+### 68.4 测试与门槛
+
+- `test/chat.reaction-json.test.ts` 6 例：JSON 取出表情且 @目标照旧切分；顶层字符串与对象里唯一字符串值也认；缩进成多行的 JSON 整段解析、不按换行切碎；JSON 里的 NONE 与文本 NONE 同义；形态错乱回落到旧文本解析；`LlmRequest` 带 `json_schema`（name 固定、`reaction` 必填）。
+- `test/providers.openai.test.ts:726` 起 3 例：`responseFormat` 原样进 body 且排在 `stream` 之前、旧字段顺序不动；`json_object` 同样透传；不给该字段时键不出现（含流式走同一个 `bodyOf`）。
+- `test/providers.anthropic.test.ts:433`：不发 `response_format`、不报错。
+- 门槛：`npm run typecheck` 0；`npm test` **87 文件 1630 例**。
+- 中继侧实测（pg-relay 容器内 `data/_probe_json1.mjs` / `_probe_json2.mjs`）：`json_object` 200 / 6.2s / `{"emoji":":laugh:"}`；`json_schema` 200 / 4.4s / 同形状；**与函数工具同发** 200 且照旧回 `tool_calls`（两者不冲突，工具优先）。
+
+### 68.5 边界
+
+- 只在 `openai-compat` 通道发这个键。如果把表情模型换成不认识 `response_format` 的供应商，最坏是那一路 400 —— `askReactionModel()` 只 warn 从不抛错（`src/core/chat/service.ts:1044`），结果是这轮不贴表情，正文不受影响。
+- `json_schema.strict` 在上游没有对应槽，传了也不生效；schema 这里只用「一个必填字符串」，没引入 `additionalProperties` 之类没验过的关键字。
+- 结构化输出不改变「贴不贴」的决策语义，也不改贴表情链路与正文表情文案（那两条各归 `§28` 与 `§66`）。
+- 没有新迁移，迁移总数仍是 31；中继那份改动只影响 `response_format` 这一条通道，不带该字段的请求逐字不变。
+

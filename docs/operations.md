@@ -2408,7 +2408,7 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 7. **关掉就用 DELETE**：`DELETE /api/body-emoji-guides` 带 `{ scope, scopeId }`，幂等回 `{ ok: true }`；PUT 收到空串会回 `400 BAD_BODY_EMOJI_GUIDE`——「留空回上一层」只有 DELETE 这一种叫法。
 8. **回退**：镜像回退 `worldbook-ctx-1` 即回到「正文只有 `[[react:…]]`」；迁移 `0031` 建的表旧版不读，留着不影响（账本会显示 `applied=0 skipped=31`）。
 
-## 45. prompt-copy-1（现版）的判据：怎么确认预设真的搬过去了
+## 45. prompt-copy-1的判据：怎么确认预设真的搬过去了
 
 1. **先看卡片**：后台「提示词」页上方（预设段编辑器之上）应有一张「复制预设」卡片，四个选择器依次是「来源作用域 / 来源 ID / 目标作用域 / 目标 ID」；来源与目标都选好、ID 填对之前「复制」是禁用的。
 2. **点下去要有确认框**：文案是「确定把「<源>」的提示词预设复制到「<目标>」？这会覆盖目标作用域现有的预设：该层原有的段与 temperature / maxTokens 会被整层替换，其它作用域不动。」取消则一个请求都不发。
@@ -2418,4 +2418,14 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 6. **回读两处确认**：目标层 `GET /api/prompts?scope=<toScope>&scopeId=<toId>` 里 `segments` 与 `temperature` / `maxTokens` 应是源那份；同时 `GET /api/prompts?scope=<fromScope>...` 的源层一个字没变——复制只写目标层。
 7. **库只看两张表**：`SELECT scope, scope_id, position, name, enabled, placement FROM prompt_segments WHERE scope = '<to>' AND scope_id = '<toId>' ORDER BY position` 与 `SELECT scope, scope_id, temperature, max_tokens FROM prompts WHERE scope = '<to>' AND scope_id = '<toId>'`；复制后目标层是显式配置，之后不再跟随上层。
 8. **回退**：镜像回退 `emoji-body-2` 即回到「只能逐层导入」；没有新迁移（总数仍是 31），旧版不认这张卡片也不认这个接口，库结构不变。
+
+## 46. reaction-json-1（现版）的判据：表情选择真的走了结构化输出
+
+1. **中继日志先看一行**：每轮回复之后那条小模型请求前应有 `结构化输出 type=json_schema`，紧接着 `生成参数 [null,null,null,null,null,null,null,"application/json",[6,…,["reaction",[1]]],["reaction"]]`——下标 8 里就是这份 schema；没有 `结构化输出` 这行说明请求根本没带 `response_format`（可能是表情模型被换成了不发这个键的供应商）。
+2. **返回的是 JSON**：同一条请求的 `响应形状 text=…` 里，正文应是 `{"reaction":":名字:"}` 或 `{"reaction":"NONE"}` 这种一行 JSON，而不是裸的 `:名字:`。
+3. **bot 日志照旧有「表情选择」**：`runtime_logs` 里应出现 `表情选择 model=… value=:名字: ms=…`；`value` 是解析后的表情名（不是整段 JSON），说明 `jsonReactionValues()` 已经取到字段。
+4. **NONE 的轮次不贴**：`{"reaction":"NONE"}` 那轮只会有一条 `表情选择 … value=NONE`（或直接无 `贴表情` 行），不会有 `贴表情失败`。
+5. **兜底仍然有效**：把表情模型临时换成会回纯文本的通道（或不发 `response_format` 的供应商），`value` 仍应从 `：名字：` 里取出来——解析顺序是 JSON 前缀尝试，失败才逐行读文本。
+6. **最坏情况不影响正文**：该路请求 400 时 `askReactionModel()` 只 warn，正文照发，只是这轮没有表情；查到 `表情模型没有可用 Key` 或 provider 报错时按这条判断，不要以为主链坏了。
+7. **回退**：镜像回退 `prompt-copy-1` 即回到「只靠提示词自觉回一行」；没有新迁移（总数仍是 31），中继那份 `response_format` 支持留着不影响旧客户端（不带该字段的请求逐字不变）。
 
