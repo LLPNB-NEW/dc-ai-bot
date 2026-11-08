@@ -448,6 +448,8 @@ export interface TurnResult {
   reactions: ReactionRequest[];
   /** 本轮模型写了 [[voice]]：语音开关为「按指令」时靠它决定要不要念 */
   voiceRequested?: boolean;
+  /** 本轮模型调了 draw_image：图已生成，网关直接以附件发出（text 通常为空） */
+  image?: { data: Uint8Array; mime: string; prompt: string };
 }
 
 /** 运行日志级别（§19） */

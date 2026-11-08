@@ -116,15 +116,23 @@ export async function channelRequest(options: ChannelRestOptions, method: string
 export const VOICE_FILENAME = 'voice.mp3';
 export const VOICE_CONTENT_TYPE = 'audio/mpeg';
 
+/** 附件的展示形状：语音是 mp3，画图是 image/jpeg（由调用方按 mime 传进来） */
+export interface ChannelFileShape {
+  name: string;
+  contentType: string;
+}
+
 /**
- * 发一条语音附件到频道（Bot token 直连）：multipart 里 payload_json 放 body、files[0] 放 mp3。
+ * 发一条附件到频道（Bot token 直连）：multipart 里 payload_json 放 body、files[0] 放文件。
+ * 不给 shape 时按语音 mp3 发（既有调用点），给了就按它自己的文件名与类型发。
  * 不手写 content-type —— boundary 必须由运行时生成，手写一定会把请求写坏。
- * payload_json 的 allowed_mentions 显式清空：语音是纯附件，不该顺带 ping 到任何人。
+ * payload_json 的 allowed_mentions 显式清空：附件是纯附件，不该顺带 ping 到任何人。
  */
 export async function sendChannelFile(
   options: ChannelRestOptions,
   channelId: string,
   audio: Uint8Array,
+  shape?: ChannelFileShape,
 ): Promise<void> {
   const apiBase = (options.apiBase ?? DEFAULT_API_BASE).replace(/\/+$/, '');
   const form = new FormData();
@@ -132,7 +140,11 @@ export async function sendChannelFile(
   // 复制一份独立的 ArrayBuffer：Uint8Array 可能建在共享缓冲上，不是 BlobPart 能接受的那种
   const bytes = new Uint8Array(audio.byteLength);
   bytes.set(audio);
-  form.append('files[0]', new Blob([bytes], { type: VOICE_CONTENT_TYPE }), VOICE_FILENAME);
+  form.append(
+    'files[0]',
+    new Blob([bytes], { type: shape?.contentType ?? VOICE_CONTENT_TYPE }),
+    shape?.name ?? VOICE_FILENAME,
+  );
 
   const response = await channelFetch(options)(apiBase + `/channels/${encodeURIComponent(channelId)}/messages`, {
     method: 'POST',

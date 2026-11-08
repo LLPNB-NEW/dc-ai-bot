@@ -33,6 +33,7 @@ import type {
   ChannelKey,
   ChannelMemoryConfig,
   ChatMessage,
+  ChatToolCall,
   ConversationSummary,
   CustomEmoji,
   LlmImage,
@@ -106,6 +107,7 @@ import {
 } from './context-tool';
 import { dropRefusalHistory } from './refusal-filter';
 import { replyToolsFor } from './reply-tool';
+import { IMAGE_MODEL_NAME, drawPromptOf, drawToolsFor, requestImage } from './image-tool';
 import { STAMP_OFFSET_MINUTES, stripStamp } from './stamp';
 import { unwrapToolReply, unwrapToolReplyStream } from './tool-shell';
 import { stripWrapperTags } from './wrapper-tags';
@@ -1281,7 +1283,10 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
     // system 只留那一句「正文在哪、怎么交付」，线上形状与酒馆那条重放一致
     const system = contextToolMode ? CONTEXT_TOOL_SYSTEM : legacySystem;
     // 工具定义只跟着 system 走：预设点名 story_reply 才有一条，其余频道是空数组（请求体里连键都没有）
-    const tools = replyToolsFor(system);
+    // 画图工具只在上下文工具模式给：普通模式不解析 tool_calls，发了它模型真去调就会变成空回。
+    // 门控看预设正文——上下文模式下它在描述体里、不在 system 里，所以两个段落都要扫
+    const drawTools = contextToolMode ? drawToolsFor(promptParts.before + '\n' + promptParts.after) : [];
+    const tools = [...replyToolsFor(system), ...drawTools];
     // 空工具集连键都不放：请求对象与加这一层之前逐字相同（不是 tools: []）
     const toolFields: Pick<LlmRequest, 'tools' | 'toolChoice'> =
       tools.length > 0 ? { tools, toolChoice: 'auto' } : {};
@@ -1339,7 +1344,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
         ])
       : '';
     const contextToolFields: Pick<LlmRequest, 'tools' | 'toolChoice'> = contextToolMode
-      ? { tools: buildContextTools(contextBody), toolChoice: 'auto' }
+      ? { tools: [...buildContextTools(contextBody), ...drawTools], toolChoice: 'auto' }
       : {};
     // §59 补交付回合：模型只调了 context 就收尾时，改用「上下文进 system、只留回复工具」再问一次
     const contextReplyFields: Pick<LlmRequest, 'tools' | 'toolChoice'> = contextToolMode
@@ -1440,7 +1445,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
           // 不会被下面那条「一个字都没有」的判定误判成空回
           const streamContext = async (
             target: LlmRequest,
-          ): Promise<{ text: string; calls: number; finishReason?: string }> => {
+          ): Promise<{ text: string; calls: ChatToolCall[]; finishReason?: string }> => {
             let accumulated = '';
             let finish: string | undefined;
             const toolDeltas: ToolCallDelta[] = [];
@@ -1456,18 +1461,23 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
             const calls = accumulateToolCalls(toolDeltas);
             return {
               text: readToolReply(calls, accumulated),
-              calls: calls.length,
+              calls,
               ...(finish === undefined ? {} : { finishReason: finish }),
             };
           };
+          // 本轮模型点名画图：拿到 prompt 就不当空回、也不走补交付，直接把图生出来
+          let drawPrompt: string | null = null;
+          let imageResult: TurnResult['image'];
           if (contextToolMode) {
             const first = await streamContext(request);
             raw = first.text;
             finishReason = first.finishReason;
+            drawPrompt = drawPromptOf(first.calls);
+            if (drawPrompt !== null) raw = '';
             // §59 补交付：一个字正文都没交、却调过工具（线上就是只调了 context 交白卷）——
             // 再问一次，这一回合没有 context 可调，只能把正文写进 story_reply。
             // 仍然空才交给下面那条空回判定（原地重试，见 catch）
-            if (raw.trim() === '' && first.calls > 0) {
+            if (drawPrompt === null && raw.trim() === '' && first.calls.length > 0) {
               emit(
                 'warn',
                 'chat',
@@ -1507,9 +1517,33 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
               }
             }
           }
+          // 画图：调用已经攒齐，这里同步生成（15–30s），成功后本轮正文就是空——只发图
+          if (drawPrompt !== null) {
+            const imageStartedAt = Date.now();
+            try {
+              imageResult = await requestImage({
+                baseUrl: decrypted.baseUrl,
+                apiKey: decrypted.apiKey,
+                prompt: drawPrompt,
+                fetch: callGlobalFetch,
+              });
+              emit(
+                'info',
+                'chat',
+                '图片回复 model=' + IMAGE_MODEL_NAME +
+                ' key=' + decrypted.label +
+                ' prompt=' + String(drawPrompt.length) +
+                ' bytes=' + String(imageResult.data.byteLength) +
+                ' ms=' + String(Date.now() - imageStartedAt),
+              );
+            } catch (error) {
+              // 生成失败不能静默：这一轮宁可当空回重试，也不发一张空白图
+              emit('warn', 'chat', '图片生成失败 key=' + decrypted.label + ' ' + describeError(error));
+            }
+          }
           // 上游把流干净地关掉却一个字都没给（上下文工具模式则在拼回调用之后仍然没有正文）：
-          // 这不是成功，按空回处理（原地重试，见 catch）
-          if (raw.trim() === '') {
+          // 这不是成功，按空回处理（原地重试，见 catch）。真生成了图的那一轮允许正文为空
+          if (raw.trim() === '' && imageResult === undefined) {
             emptyReply = true;
             throw new Error('EMPTY_RESPONSE');
           }
@@ -1597,6 +1631,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
           };
           // 只有真出现过才挂字段：没写指令的轮次保持原样，既有断言与调用方都不用关心它
           if (voiceRequested) result.voiceRequested = true;
+          if (imageResult !== undefined) result.image = imageResult;
           const storedUser: ChatMessage = {
             role: 'user',
             content: ctx.storedUserText ?? ctx.userText,
@@ -1609,7 +1644,13 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
           if (ctx.userDiscordId !== undefined) storedUser.discordId = ctx.userDiscordId;
           await conversations.append(key, [
             storedUser,
-            { role: 'assistant', content: text, author: ctx.botName, createdAt: now().toISOString() },
+            {
+              role: 'assistant',
+              // 只发图的那轮正文是空的：历史里留个占位，模型下一轮才知道自己画过
+              content: text === '' && imageResult !== undefined ? '[图片]' : text,
+              author: ctx.botName,
+              createdAt: now().toISOString(),
+            },
           ]);
           // 成功事件在 append 之后：用户看到的那条已经落库，日志里才报成功
           emit(
@@ -1625,6 +1666,8 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
             (continued > 0 ? ' cont=' + String(continued) : '') +
             // 同上：有图才写张数，无图时这一行与旧版逐字相同
             (images.length > 0 ? ' images=' + String(images.length) : '') +
+            // 画图那一轮正文是空的：用这个字段区分「空回」与「只发图」
+            (imageResult !== undefined ? ' image=1' : '') +
             ' guide=' + guide.scope +
             ' key=' + decrypted.label +
             // §55：只有上下文工具模式才有这一项，老形状的这一行日志逐字不变
@@ -1634,7 +1677,8 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
           await maybeSummarize(key, summary, summaryEveryMessages);
           // 表情模型（§21）：附带的第二次调用，放在落库之后才问——正文已经确定，问不问得到都不改它；
           // 也放在摘要触发之后，别让这一步的网络等待拖后自动摘要
-          if (ctx.wantReactions === true) {
+          // 只发图那一轮没有正文可贴表情：空串去问表情模型只会白花一次调用
+          if (ctx.wantReactions === true && text.trim() !== '') {
             let extra: ReactionRequest[] = [];
             try {
               extra = await selectReaction(ctx, text, guide, template, reactionHistory, loadTurnImagesOnce);

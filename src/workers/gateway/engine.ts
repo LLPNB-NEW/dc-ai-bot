@@ -56,6 +56,7 @@ import type {
   ReactionTarget,
   ReplyRef,
   TurnContext,
+  TurnResult,
 } from '../../core/types';
 import { createSecretBox } from '../crypto/secretbox';
 import { readRevealSteps } from '../../core/chat/reply-view';
@@ -128,7 +129,7 @@ export const GATEWAY_STATUS_PATH = '/status';
 export const GATEWAY_SHUTDOWN_PATH = '/shutdown';
 
 /** 引擎版本标记：DO 在每次 alarm 打一次、Node 宿主启动时打一次，用来确认线上跑的是哪一版 */
-export const GATEWAY_BUILD = 'reaction-effort-1';
+export const GATEWAY_BUILD = 'draw-image-1';
 
 /** 握手看门狗：连上了却一直没等到 HELLO 时，靠这次 alarm 把宿主再唤醒一次 */
 const HANDSHAKE_WATCHDOG_MS = 15000;
@@ -730,6 +731,7 @@ class GatewayEngineCore {
       const mention = message.guildId === null ? '' : mentionPrefix(message.author.id);
       const stream = await this.#openStream(message.channelId, channel, revealSteps, mention);
       let text: string;
+      let image: TurnResult['image'];
       let reactions: ReactionRequest[] = [];
       // 故障提示不是聊天回复：finish 用它把 @ 前缀覆盖成空串
       let mentionOverride: string | undefined;
@@ -739,8 +741,10 @@ class GatewayEngineCore {
       let storedReplyText: string | undefined;
       try {
         const result = await chat.run(context, { onProgress: (partial) => stream.push(partial) });
+        image = result.image;
         if (result.text.trim() !== '') storedReplyText = result.text;
-        text = result.text.trim() === '' ? '（模型没有返回内容）' : result.text;
+        // 只发图的那轮正文是空的：不写兜底文案，这条文字消息根本不该存在
+        text = result.text.trim() === '' ? (result.image === undefined ? '（模型没有返回内容）' : '') : result.text;
         reactions = result.reactions;
         // 空回复的兜底文案不是模型的话，不能念
         voiceRequested = result.voiceRequested === true && result.text.trim() !== '';
@@ -750,6 +754,28 @@ class GatewayEngineCore {
         mentionOverride = '';
       }
 
+      // 画图：模型调 draw_image 的那轮没有正文，图由服务层生成，这里直接以附件发出。
+      // 只发图时连一条空文字消息都不建（stream 没 push 过，还只是空壳）
+      const imageOnly = image !== undefined && text.trim() === '';
+      let imageSent = false;
+      if (image !== undefined) {
+        const sendImage = channel.sendFile;
+        if (sendImage !== undefined) {
+          try {
+            await sendImage.call(channel, message.channelId, image.data, {
+              // Discord 按后缀预览：jpeg 用 .jpg，其余按 mime 推断一个能预览的后缀
+              name: image.mime === 'image/png' ? 'image.png' : image.mime === 'image/webp' ? 'image.webp' : 'image.jpg',
+              contentType: image.mime,
+            });
+            imageSent = true;
+          } catch (error) {
+            this.#logGateway('warn', '发送图片失败：' + describeError(error));
+          }
+        }
+        // 图没发出去又没别的正文：给一句话，别让这一轮彻底空着
+        if (!imageSent && imageOnly) text = '（图片没发出去）';
+      }
+      if (!imageOnly || !imageSent) {
       // 正文里的 :名字: 先渲染成 <:名字:id> 再切段：切的是最终文本，标记不会被切成两半
       // 切段上限先扣掉 @ 前缀：先按 1900 切再拼前缀，withMention 会把首段尾巴削掉、第二段接不上
       const chunkLimit = Math.max(1, MESSAGE_CHUNK_LIMIT - mention.length);
@@ -770,6 +796,7 @@ class GatewayEngineCore {
       }
       for (const chunk of chunks.slice(1)) {
         await channel.sendMessage(message.channelId, chunk);
+      }
       }
       // 回复已经发出去了：贴表情是锦上添花，失败只 warn，绝不影响回复与后续流程
       await this.#react(message, reactions, customEmojis, reactionTargets);

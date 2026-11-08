@@ -3689,3 +3689,76 @@ describe('§55 上下文工具模式（contextTool）', () => {
   });
 });
 
+
+describe('画图工具（draw_image）', () => {
+  const DRAW_PRESET = '你是示例角色。每次回复都调用 story_reply，把正文放进 content。想画画时调用 draw_image。';
+  const DRAW_ARGS = JSON.stringify({ prompt: '一只橘猫坐在窗台上' });
+
+  it('模型调 draw_image：只发图不发字，历史留 [图片]，工具表里多一条', async () => {
+    const requests: LlmRequest[] = [];
+    const harness = makeHarness({
+      providers: {
+        'openai-compat': toolProvider(
+          'openai-compat',
+          { text: '', toolCalls: [{ name: 'draw_image', arguments: DRAW_ARGS }] },
+          { onRequest: (req) => requests.push(req) },
+        ),
+      },
+      keys: { 'openai-compat': decryptedKey('openai-compat', { baseUrl: 'https://relay.test/pg/v1' }) },
+      routes: { global: ROUTE },
+      prompts: { global: { segments: [segment('main', DRAW_PRESET)] } },
+      channelMemory: memoryConfig({ contextTool: true }),
+    });
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from('img').toString('base64') }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const result = await createChatService(harness.deps).run(CTX);
+      expect(result.text).toBe('');
+      expect(result.image?.mime).toBe('image/jpeg');
+      expect(Buffer.from(result.image?.data ?? new Uint8Array()).toString()).toBe('img');
+      expect(urls[0]).toBe('https://relay.test/pg/v1/images/generations');
+      expect(requests[0]?.tools?.map((tool) => tool.function.name)).toEqual([
+        'context',
+        'story_reply',
+        'draw_image',
+      ]);
+      expect(harness.appendCalls[0]?.messages[1]?.content).toBe('[图片]');
+      expect(harness.logEntries.some((entry) => entry.message.includes('图片回复'))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('预设没点名 draw_image：工具表仍是原来两条，一次图都不生', async () => {
+    const PRESET = '你是示例角色。每次回复都调用 story_reply，把正文放进 content。';
+    const harness = makeHarness({
+      providers: {
+        'openai-compat': toolProvider('openai-compat', {
+          text: '',
+          toolCalls: [{ name: 'story_reply', arguments: JSON.stringify({ game_content: '正文' }) }],
+        }),
+      },
+      keys: { 'openai-compat': decryptedKey('openai-compat') },
+      routes: { global: ROUTE },
+      prompts: { global: { segments: [segment('main', PRESET)] } },
+      channelMemory: memoryConfig({ contextTool: true }),
+    });
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const result = await createChatService(harness.deps).run(CTX);
+      expect(result.text).toBe('正文');
+      expect(result.image).toBeUndefined();
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

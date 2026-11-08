@@ -27,8 +27,9 @@ export interface ChannelClient {
   createMessage(channelId: string, content: string): Promise<string>;
   /** §29：改写自己发出去的那条消息 */
   editMessage(channelId: string, messageId: string, content: string): Promise<void>;
-  /** 语音附件：单独一条消息发 mp3；没有这条能力的通道不必实现，调用方跳过即可 */
-  sendFile?(channelId: string, bytes: Uint8Array): Promise<void>;
+  /** 附件：单独一条消息发一个文件；没有这条能力的通道不必实现，调用方跳过即可。
+   *  不给 file 时按语音 mp3 发（既有调用点），给了就按它自己的文件名与类型发（图片） */
+  sendFile?(channelId: string, bytes: Uint8Array, file?: { name: string; contentType: string }): Promise<void>;
 }
 
 export function createChannelClient(options: ChannelClientOptions): ChannelClient {
@@ -76,9 +77,13 @@ export function createChannelClient(options: ChannelClientOptions): ChannelClien
     editMessage: async (channelId: string, messageId: string, content: string): Promise<void> => {
       await request('PATCH', '/channels/' + channelId + '/messages/' + messageId, messageBody(content));
     },
-    sendFile: async (channelId: string, bytes: Uint8Array): Promise<void> => {
+    sendFile: async (
+      channelId: string,
+      bytes: Uint8Array,
+      file?: { name: string; contentType: string },
+    ): Promise<void> => {
       // multipart 的实现只留一份（discord/rest.ts）：两条发送路径共用同一个附件形状
-      await sendChannelFile(options, channelId, bytes);
+      await sendChannelFile(options, channelId, bytes, file);
     },
   };
 }
