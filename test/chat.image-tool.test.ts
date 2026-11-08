@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  DRAW_LINE_MAX_CHARS,
   DRAW_TOOL_NAME,
   IMAGE_PROMPT_MAX_CHARS,
+  drawLineOf,
   drawPromptOf,
   drawToolsFor,
   requestImage,
@@ -12,11 +14,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe('draw_image 工具定义', () => {
-  it('预设里写了 draw_image 才下发，参数只要求 prompt', () => {
+  it('预设里写了 draw_image 才下发，参数要求 prompt 与 say', () => {
     const tools = drawToolsFor('想画的时候调用 draw_image。');
     expect(tools).toHaveLength(1);
     expect(tools[0]?.function.name).toBe(DRAW_TOOL_NAME);
-    expect(tools[0]?.function.parameters?.required).toEqual(['prompt']);
+    expect(tools[0]?.function.parameters?.required).toEqual(['prompt', 'say']);
   });
 
   it('预设没写就不下发：没有这条工具时请求体里连它都没有', () => {
@@ -33,6 +35,21 @@ describe('draw_image 工具定义', () => {
   it('prompt 超长截断到上限', () => {
     const prompt = drawPromptOf([{ name: 'draw_image', arguments: JSON.stringify({ prompt: 'x'.repeat(9000) }) }]);
     expect(prompt).toHaveLength(IMAGE_PROMPT_MAX_CHARS);
+  });
+
+  it('从同一个调用里取台词 say：缺省、空串、坏 JSON 都返回 null', () => {
+    expect(drawLineOf([{ name: 'draw_image', arguments: JSON.stringify({ prompt: '猫', say: ' 画好啦 ' }) }])).toBe(
+      '画好啦',
+    );
+    expect(drawLineOf([{ name: 'draw_image', arguments: JSON.stringify({ prompt: '猫' }) }])).toBeNull();
+    expect(drawLineOf([{ name: 'draw_image', arguments: JSON.stringify({ prompt: '猫', say: '   ' }) }])).toBeNull();
+    expect(drawLineOf([{ name: 'draw_image', arguments: 'not json' }])).toBeNull();
+    expect(drawLineOf([{ name: 'story_reply', arguments: '{"game_content":"正文"}' }])).toBeNull();
+  });
+
+  it('台词超长截断到上限', () => {
+    const say = drawLineOf([{ name: 'draw_image', arguments: JSON.stringify({ prompt: '猫', say: 'y'.repeat(900) }) }]);
+    expect(say).toHaveLength(DRAW_LINE_MAX_CHARS);
   });
 });
 

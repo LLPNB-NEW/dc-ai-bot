@@ -129,7 +129,7 @@ export const GATEWAY_STATUS_PATH = '/status';
 export const GATEWAY_SHUTDOWN_PATH = '/shutdown';
 
 /** 引擎版本标记：DO 在每次 alarm 打一次、Node 宿主启动时打一次，用来确认线上跑的是哪一版 */
-export const GATEWAY_BUILD = 'draw-image-2';
+export const GATEWAY_BUILD = 'draw-image-3';
 
 /** 握手看门狗：连上了却一直没等到 HELLO 时，靠这次 alarm 把宿主再唤醒一次 */
 const HANDSHAKE_WATCHDOG_MS = 15000;

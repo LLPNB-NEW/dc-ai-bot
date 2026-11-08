@@ -107,7 +107,7 @@ import {
 } from './context-tool';
 import { dropRefusalHistory } from './refusal-filter';
 import { replyToolsFor } from './reply-tool';
-import { IMAGE_MODEL_NAME, drawPromptOf, drawToolsFor, requestImage } from './image-tool';
+import { IMAGE_MODEL_NAME, drawLineOf, drawPromptOf, drawToolsFor, requestImage } from './image-tool';
 import { STAMP_OFFSET_MINUTES, stripStamp } from './stamp';
 import { unwrapToolReply, unwrapToolReplyStream } from './tool-shell';
 import { stripWrapperTags } from './wrapper-tags';
@@ -1473,7 +1473,11 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
             raw = first.text;
             finishReason = first.finishReason;
             drawPrompt = drawPromptOf(first.calls);
-            if (drawPrompt !== null) raw = '';
+            if (drawPrompt !== null) {
+              // 画图那一轮：台词在 say 里；没给就保留模型自己写的正文（有就发），再没有才是纯图
+              const spoken = drawLineOf(first.calls);
+              if (spoken !== null) raw = spoken;
+            }
             // §59 补交付：一个字正文都没交、却调过工具（线上就是只调了 context 交白卷）——
             // 再问一次，这一回合没有 context 可调，只能把正文写进 story_reply。
             // 仍然空才交给下面那条空回判定（原地重试，见 catch）

@@ -3694,7 +3694,7 @@ describe('画图工具（draw_image）', () => {
   const DRAW_PRESET = '你是示例角色。每次回复都调用 story_reply，把正文放进 content。想画画时调用 draw_image。';
   const DRAW_ARGS = JSON.stringify({ prompt: '一只橘猫坐在窗台上' });
 
-  it('模型调 draw_image：只发图不发字，历史留 [图片]，工具表里多一条', async () => {
+  it('模型只给 prompt 不给 say：只发图不发字，历史留 [图片]，工具表里多一条', async () => {
     const requests: LlmRequest[] = [];
     const harness = makeHarness({
       providers: {
@@ -3731,6 +3731,46 @@ describe('画图工具（draw_image）', () => {
       ]);
       expect(harness.appendCalls[0]?.messages[1]?.content).toBe('[图片]');
       expect(harness.logEntries.some((entry) => entry.message.includes('图片回复'))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('模型给了 say：图与台词一起回来，历史存台词而不是 [图片]', async () => {
+    const requests: LlmRequest[] = [];
+    const harness = makeHarness({
+      providers: {
+        'openai-compat': toolProvider(
+          'openai-compat',
+          {
+            text: '',
+            toolCalls: [
+              { name: 'draw_image', arguments: JSON.stringify({ prompt: '一只橘猫坐在窗台上', say: '画好啦，橘猫在窗台上晒太阳。' }) },
+            ],
+          },
+          { onRequest: (req) => requests.push(req) },
+        ),
+      },
+      keys: { 'openai-compat': decryptedKey('openai-compat', { baseUrl: 'https://relay.test/pg/v1' }) },
+      routes: { global: ROUTE },
+      prompts: { global: { segments: [segment('main', DRAW_PRESET)] } },
+      channelMemory: memoryConfig({ contextTool: true }),
+    });
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ data: [{ b64_json: Buffer.from('img').toString('base64') }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const result = await createChatService(harness.deps).run(CTX);
+      expect(result.text).toBe('画好啦，橘猫在窗台上晒太阳。');
+      expect(result.image?.mime).toBe('image/jpeg');
+      expect(harness.appendCalls[0]?.messages[1]?.content).toBe('画好啦，橘猫在窗台上晒太阳。');
+      const drawToolDef = requests[0]?.tools?.find((tool) => tool.function.name === 'draw_image');
+      expect(drawToolDef?.function.parameters?.required).toEqual(['prompt', 'say']);
     } finally {
       vi.unstubAllGlobals();
     }
