@@ -6,6 +6,7 @@
  * 的来历完全一样：只有开关/清单不够，得把写法说给模型听。
  */
 import { describe, expect, it } from 'vitest';
+import { CONTEXT_TOOL_SYSTEM } from '../src/core/chat/context-tool';
 import { createChatService, renderVoiceHint } from '../src/core/chat/service';
 import type { ChatServiceDeps } from '../src/core/chat/service';
 import type {
@@ -84,7 +85,17 @@ function unusedProvider(id: ProviderId, reason: string): LlmProvider {
   };
 }
 
-function makeHarness(): { deps: ChatServiceDeps; requests: LlmRequest[] } {
+/** 上下文工具模式只在频道记忆行显式点名时进入（§55）；这里按需装一份最小行 */
+const CONTEXT_ROW = {
+  guildId: 'g1',
+  channelId: 'c1',
+  historyMaxMessages: 50,
+  summaryEveryMessages: 50,
+  contextTool: true,
+  updatedAt: '2026-10-25T03:00:00.000Z',
+};
+
+function makeHarness(contextTool = false): { deps: ChatServiceDeps; requests: LlmRequest[] } {
   const requests: LlmRequest[] = [];
   const state: ChatMessage[] = [];
   const deps: ChatServiceDeps = {
@@ -150,12 +161,28 @@ function makeHarness(): { deps: ChatServiceDeps; requests: LlmRequest[] } {
       gemini: unusedProvider('gemini', '没有表情模型，不该有第二次调用'),
     },
     config: {},
+    ...(contextTool
+      ? {
+          channelMemory: {
+            async get() {
+              return CONTEXT_ROW;
+            },
+            async list() {
+              return [CONTEXT_ROW];
+            },
+            async put(cfg: typeof CONTEXT_ROW) {
+              return cfg;
+            },
+            async remove() {},
+          },
+        }
+      : {}),
   };
   return { deps, requests };
 }
 
-async function systemFor(ctx: TurnContext): Promise<string> {
-  const harness = makeHarness();
+async function systemFor(ctx: TurnContext, contextTool = false): Promise<string> {
+  const harness = makeHarness(contextTool);
   const service = createChatService(harness.deps);
   await service.run(ctx);
   expect(harness.requests).toHaveLength(1);
@@ -198,6 +225,18 @@ describe('voiceHint 决定 system 里有没有【语音】段', () => {
     const explicit = await systemFor({ ...CTX, voiceHint: false });
 
     expect(explicit).toBe(absent);
+  });
+
+  it('§55 上下文工具模式：system 换成固定那份，【语音】段照旧接在末尾', async () => {
+    const system = await systemFor({ ...CTX, voiceHint: true }, true);
+
+    expect(system).toBe(CONTEXT_TOOL_SYSTEM + VOICE_HINT);
+  });
+
+  it('§55 上下文工具模式、没有语音提示时：system 与固定那份逐字相同', async () => {
+    const system = await systemFor(CTX, true);
+
+    expect(system).toBe(CONTEXT_TOOL_SYSTEM);
   });
 
   it('位置在表情规则块之后、自定义表情清单之前', async () => {

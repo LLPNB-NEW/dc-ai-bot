@@ -1267,13 +1267,15 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
     // 预设段又回到天头（§52）：它自己不带前导空行，用两个换行和后面的平台元信息分开
     const presetHead = promptParts.before === '' ? '' : promptParts.before + '\n\n';
     const presetAfter = promptParts.after === '' ? '' : '\n\n' + promptParts.after;
+    // 语音提示段先算一次：两套 system 都要用它（§55 的上下文 system 没有别的段落可挂）
+    const voiceHint = renderVoiceHint(ctx.voiceHint);
     // 身份块自带两个前导换行（当年当天头时的分隔约定）；只有预设为空、它真出现在天头时才需要削掉
     const legacySystem =
       presetHead +
       identityBlock.replace(/^\n+/, '') +
       mentionRule +
       renderReactionGuide(guide.prompt) +
-      renderVoiceHint(ctx.voiceHint) +
+      voiceHint +
       renderEmojiBlock(ctx.customEmojis) +
       bodyEmojiPart +
       renderReactionTargets(ctx.reactionTargets) +
@@ -1281,7 +1283,9 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
       presetAfter;
     // §55：这一模式不发任何平台元信息——预设正文、摘要与历史整体搬进 context 工具的描述，
     // system 只留那一句「正文在哪、怎么交付」，线上形状与酒馆那条重放一致
-    const system = contextToolMode ? CONTEXT_TOOL_SYSTEM : legacySystem;
+    // 上下文 system 是另一份固定文案，上面那一整串段落一个都不在里面 —— 包括【语音】段，
+    // 结果就是线上（mode=context）永远等不到 [[voice]]。按需把它接在这份 system 末尾。
+    const system = contextToolMode ? CONTEXT_TOOL_SYSTEM + voiceHint : legacySystem;
     // 工具定义只跟着 system 走：预设点名 story_reply 才有一条，其余频道是空数组（请求体里连键都没有）
     // 画图工具只在上下文工具模式给：普通模式不解析 tool_calls，发了它模型真去调就会变成空回。
     // 门控看预设正文——上下文模式下它在描述体里、不在 system 里，所以两个段落都要扫

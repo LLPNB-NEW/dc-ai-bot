@@ -5367,3 +5367,30 @@ export interface ToolCallDelta {
 - 中继是独立进程，它的超时只认 `.env`（改完要 `docker compose up -d --build`），后台改不到。
 - `.env` 优先级低于后台：库里存过的项永远盖住 env，想回到 env 就在页面上「恢复默认」。
 - workerd 多 isolate 下，后台保存只对当前 isolate 立即生效，其它 isolate 在下一次请求前重读（最多晚一条请求）。
+
+## 71. 上下文工具模式下补上【语音】段（voice-hint-context-1，2026-11-09）
+
+### 71.1 缺的是什么
+
+「按指令」模式（`voice_settings.mode = 1`）靠模型在正文里写一行 `[[voice]]` 触发，提示段由 `renderVoiceHint()` 输出（`src/core/chat/service.ts:530`）。但它只拼进 `legacySystem`；而 §55 上下文工具模式把整个 system 换成了 `CONTEXT_TOOL_SYSTEM` 一句固定文案（`src/core/chat/service.ts:1285`），上面那一整串段落——表情规则、【语音】、正文表情、世界书、预设尾巴——一个都不在里面。
+
+线上正跑在 `mode=context`。2026-11-09 12:07Z 把开关从 0 改成 1、音色改 Kore 之后，那一轮（`runtime_logs` 1440）正文 660 字、没有 `[[voice]]`、没有语音附件，中继也没有合成日志：模型根本没被告知有这种写法。
+
+### 71.2 决定
+
+- 把 `renderVoiceHint(ctx.voiceHint)` 先算成局部变量 `voiceHint`，两套 system 共用：
+  `const system = contextToolMode ? CONTEXT_TOOL_SYSTEM + voiceHint : legacySystem;`
+- 没有语音提示时 `voiceHint` 是空串，上下文 system 与改动前逐字相同（既有请求形状与日志不变）。
+- `[[voice]]` 的解析本来就在正文那条路上：上下文模式下正文来自 `story_reply` 的 `game_content`，`stripVoiceDirective()` 照样在 `src/core/chat/service.ts:1651` 跑，所以只需要把提示送到模型，不需要另开分支。
+
+### 71.3 测试与门槛
+
+- `test/chat.voice-hint.test.ts` 新增两例：上下文模式 + `voiceHint: true` → `system === CONTEXT_TOOL_SYSTEM + VOICE_HINT`；上下文模式不带提示 → `system === CONTEXT_TOOL_SYSTEM`（逐字）。共 8 例。
+- 门槛：`typecheck` 0、`npm test` 91 文件 1668 例全过、`test:node` 119 passed + 1 skipped。
+- 门牌：`GATEWAY_BUILD = 'voice-hint-context-1'`（`src/workers/gateway/engine.ts:132`，`test/gateway.node.test.ts:229` 同步）。
+
+### 71.4 边界
+
+- 只影响「按指令」：`mode = 2`（每条都念）不依赖提示，`mode = 0` 仍然整条跳过。
+- `[[voice]]` 必须单独成行写在正文里；写在 `think_nya` 或 `extra` 参数里不会被念，模型模仿历史行写假时刻的处理也不变。
+- 上下文 system 只有这一句 + 语音段；其它段落（表情、世界书、预设）在上下文模式下依旧不出现，这是 §55 的设计，不是本版遗漏。
