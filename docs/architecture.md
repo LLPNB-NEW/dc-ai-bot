@@ -5468,3 +5468,4 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 - 中文标签在 gemini 上仍会被念：这条只在 judge 听话时成立，所以 `GEMINI_TAG_RULE` 用「会被原样念出来」当理由，而不是「请遵守格式」。
 - `voice_settings.director = 0` 时 gemini 拿不到任何风格：前缀 tag 被 `createGeminiTts` 显式忽略，风格只走导演模式。
 - openai 方言同病（`createOpenAiTts` 也忽略 tag，导演模式的中文标签会被念）；这次没改，因为线上没人用它。
+- 英文标签天生带空格：judge 写 `累，(soft) 你` 时，删掉标签会留下「， 你」，逐字校验就会把它判成改字、整条退回原文（线上第一次试听就是这样，`directorRejected=verbatim`）。所以 `stripVoiceTags` 在压空白之后再去掉中文标点两侧的空白（`，。！？；：、）】」』…`），只影响校验口径，念出去的正文一个字都不变。

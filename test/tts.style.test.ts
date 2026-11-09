@@ -175,6 +175,12 @@ describe('stripVoiceTags', () => {
     expect(stripVoiceTags('a  (b)  c')).toBe('a c');
   });
 
+  it('英文标签留下的空格不算改字：中文标点两侧的空白一并去掉', () => {
+    expect(stripVoiceTags('今天有点累，(soft) 你陪我说话')).toBe('今天有点累，你陪我说话');
+    expect(stripVoiceTags('[sigh] 今天有点累，你陪我说话。')).toBe('今天有点累，你陪我说话。');
+    expect(stripVoiceTags('今天有点累 ， 你陪我说话')).toBe('今天有点累，你陪我说话');
+  });
+
   it('没有配对的括号原样留着（不猜模型想说什么）', () => {
     expect(stripVoiceTags('a (b')).toBe('a (b');
     expect(stripVoiceTags('(怅然)')).toBe('');
@@ -446,6 +452,21 @@ describe('composeVoiceSpeech 把方言交给 judge', () => {
     ]);
     // 导演模式：风格组留在正文里只出现一次，styleLabel 单独留给日志
     expect(speech).toEqual({ tag: '', text: line, styleLabel: '(wistful)' });
+  });
+
+  it('judge 在中文标点后留了空格也不算改字：线上真实那一行必须放行', async () => {
+    const line = '(gentle cute) (soft) [sigh] 今天有点累，(sweet pleading) 你陪我说会儿话好不好？';
+    const original = '今天有点累，你陪我说会儿话好不好？';
+    const { fetchImpl } = recorder(() => judgeResponse(line));
+    const speech = await composeVoiceSpeech({
+      text: original,
+      prompt: '',
+      judge: JUDGE,
+      fetchImpl,
+      director: 1,
+      dialect: 'gemini',
+    });
+    expect(speech).toEqual({ tag: '', text: line, styleLabel: '(gentle cute)' });
   });
 });
 

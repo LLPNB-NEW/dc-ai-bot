@@ -248,7 +248,12 @@ function dropPaired(text: string, open: string, close: string): string {
 export function stripVoiceTags(text: string): string {
   let out = text;
   for (const [open, close] of TAG_PAIRS) out = dropPaired(out, open, close);
-  return out.replace(/\s+/gu, ' ').trim();
+  // 英文标签天生带空格：「累，(soft) 你」删掉标签会留下「， 你」，与原文「，你」就不再逐字相同。
+  // 中文标点两侧本来就不该有空格，所以这里两边一起去掉，避免「标签写得对、空格把它判成改字」。
+  return out
+    .replace(/\s+/gu, ' ')
+    .replace(/\s*([，。！？；：、）】」』…])\s*/gu, '$1')
+    .trim();
 }
 
 /** 一行是不是「短到只能当标签」：没有句读、点号，且不超过 20 字 */
