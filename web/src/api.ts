@@ -2513,8 +2513,8 @@ export function describePromptDefaultsError(error: unknown): string {
 // 门牌 prompt-copy-1 语音合成接口：后台是 TTS 的唯一来源，GET 只回掩码 keyHint；dialect 决定请求形状。
 // 环境变量 VOICE_TTS_* 这一版不参与取值，envPresent 只用来提示「服务器上还留着，可以删」。
 // model 已从契约移除：合成用哪个模型由后端按方言决定，页面既不显示也不提交。
-/** 上游方言：openai 走 POST /audio/speech，mimo 走小米 MiMo 的 chat/completions。 */
-export type TtsDialect = 'openai' | 'mimo';
+/** 上游方言：openai 走 POST /audio/speech（mp3），mimo 走小米 MiMo 的 chat/completions，gemini 走 /audio/speech（WAV）。 */
+export type TtsDialect = 'openai' | 'mimo' | 'gemini';
 
 /** defaults.dialects 的一项：下拉文案、地址占位与音色建议都挂在方言上。 */
 export interface TtsDialectOption {
@@ -2527,7 +2527,7 @@ export interface TtsDialectOption {
 export interface TtsSettingsDefaults {
   urlPlaceholder: string;
   voices: string[];
-  /** 可选的两套上游方言；页面照它画「接口类型」下拉与各输入框的占位 / 音色建议。 */
+  /** 可选的三套上游方言；页面照它画「接口类型」下拉与各输入框的占位 / 音色建议。 */
   dialects: TtsDialectOption[];
   defaultDialect: TtsDialect;
 }
@@ -2585,9 +2585,41 @@ export interface TtsTestResult {
   directorRejected?: string | null;
 }
 
-// 两套方言的内置定义：接口 defaults 坏掉时页面也画得出来，中文音色必须逐字对上契约。
+// 三套方言的内置定义：接口 defaults 坏掉时页面也画得出来，中文音色必须逐字对上契约。
 const TTS_OPENAI_VOICES: string[] = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
 const TTS_MIMO_VOICES: string[] = ['mimo_default', '冰糖', '茉莉', '苏打', '白桦', 'Mia', 'Chloe', 'Milo', 'Dean'];
+const TTS_GEMINI_VOICES: string[] = [
+  'Kore',
+  'Puck',
+  'Charon',
+  'Fenrir',
+  'Aoede',
+  'Leda',
+  'Orus',
+  'Zephyr',
+  'Callirrhoe',
+  'Autonoe',
+  'Enceladus',
+  'Iapetus',
+  'Umbriel',
+  'Algieba',
+  'Despina',
+  'Erinome',
+  'Algenib',
+  'Rasalgethi',
+  'Laomedeia',
+  'Achernar',
+  'Alnilam',
+  'Schedar',
+  'Gacrux',
+  'Pulcherrima',
+  'Achird',
+  'Zubenelgenubi',
+  'Vindemiatrix',
+  'Sadachbia',
+  'Sadaltager',
+  'Sulafat',
+];
 const TTS_DIALECT_FALLBACKS: TtsDialectOption[] = [
   {
     id: 'openai',
@@ -2600,6 +2632,12 @@ const TTS_DIALECT_FALLBACKS: TtsDialectOption[] = [
     label: '小米 MiMo（chat/completions）',
     urlPlaceholder: 'https://api.xiaomimimo.com/v1',
     voices: TTS_MIMO_VOICES,
+  },
+  {
+    id: 'gemini',
+    label: 'Gemini（/audio/speech，WAV）',
+    urlPlaceholder: 'https://example.com/pg/v1',
+    voices: TTS_GEMINI_VOICES,
   },
 ];
 
@@ -2615,9 +2653,9 @@ function toTtsString(raw: unknown): string {
   return typeof raw === 'string' ? raw : '';
 }
 
-// 方言 id 只认这两个：其它值后端一定 400，页面也不该画出来让用户选。
+// 方言 id 只认这三个：其它值后端一定 400，页面也不该画出来让用户选。
 function isTtsDialect(raw: unknown): raw is TtsDialect {
-  return raw === 'openai' || raw === 'mimo';
+  return raw === 'openai' || raw === 'mimo' || raw === 'gemini';
 }
 
 function toTtsDialect(raw: unknown, fallback: TtsDialect): TtsDialect {
@@ -3187,3 +3225,100 @@ export function describeWorldBookError(error: unknown): string {
   return describeError(error);
 }
 
+
+// 契约 timeout-settings-1：超时全部可在后台改；GET / PUT / DELETE 回同一份形状。
+export interface TimeoutFieldView {
+  key: string;
+  env: string;
+  label: string;
+  detail: string;
+  defaultMs: number;
+  minMs: number;
+  maxMs: number;
+  valueMs: number;
+  effectiveMs: number;
+  overridden: boolean;
+}
+
+/** 全局倍率：一次把所有超时放大或缩小，单项还会被夹在它自己的上下限里。 */
+export interface TimeoutMultiplierView {
+  value: number;
+  default: number;
+  min: number;
+  max: number;
+}
+
+export interface TimeoutsPayload {
+  fields: TimeoutFieldView[];
+  multiplier: TimeoutMultiplierView;
+}
+
+function toTimeoutNumber(raw: unknown, fallback: number): number {
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : fallback;
+}
+
+// 缺 key 的条目没法定位到具体项，直接丢弃；其余字段按 0 / 空串兜底，页面照常渲染。
+function toTimeoutFieldView(raw: unknown): TimeoutFieldView | null {
+  const source = toRecord(raw);
+  const key = typeof source.key === 'string' ? source.key : '';
+  if (key === '') return null;
+  return {
+    key,
+    env: typeof source.env === 'string' ? source.env : '',
+    label: typeof source.label === 'string' && source.label !== '' ? source.label : key,
+    detail: typeof source.detail === 'string' ? source.detail : '',
+    defaultMs: toTimeoutNumber(source.defaultMs, 0),
+    minMs: toTimeoutNumber(source.minMs, 0),
+    maxMs: toTimeoutNumber(source.maxMs, 0),
+    valueMs: toTimeoutNumber(source.valueMs, 0),
+    // 生效值由后端乘过倍率，前端不自己算，免得两边口径漂移
+    effectiveMs: toTimeoutNumber(source.effectiveMs, 0),
+    overridden: source.overridden === true,
+  };
+}
+
+function toTimeoutsPayload(raw: unknown): TimeoutsPayload {
+  const source = toRecord(raw);
+  const rawFields = Array.isArray(source.fields) ? source.fields : [];
+  const fields: TimeoutFieldView[] = [];
+  for (const item of rawFields) {
+    const field = toTimeoutFieldView(item);
+    if (field !== null) fields.push(field);
+  }
+  const multiplier = toRecord(source.multiplier);
+  return {
+    fields,
+    multiplier: {
+      value: toTimeoutNumber(multiplier.value, 1),
+      default: toTimeoutNumber(multiplier.default, 1),
+      min: toTimeoutNumber(multiplier.min, 0.1),
+      max: toTimeoutNumber(multiplier.max, 10),
+    },
+  };
+}
+
+/** GET /api/timeouts：每项的基线 / 生效值 / 上下限，加全局倍率。 */
+export async function fetchTimeouts(): Promise<TimeoutsPayload> {
+  return toTimeoutsPayload(await request<unknown>('GET', '/api/timeouts'));
+}
+
+/** PUT /api/timeouts：整份九项 + multiplier 一起提交，少一项后端就回 400。 */
+export async function saveTimeouts(values: Record<string, number>): Promise<TimeoutsPayload> {
+  return toTimeoutsPayload(await request<unknown>('PUT', '/api/timeouts', values));
+}
+
+/** DELETE /api/timeouts：清掉所有覆盖 = 恢复 .env 与内置默认，回同一份形状。 */
+export async function resetTimeouts(): Promise<TimeoutsPayload> {
+  return toTimeoutsPayload(await request<unknown>('DELETE', '/api/timeouts'));
+}
+
+// 契约 timeout-settings-1 唯一的 400 码翻成中文；401 走 describeError 的中文提示。
+export function describeTimeoutRejection(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.code === 'BAD_TIMEOUT_SETTINGS') {
+      return '超时值不合法：每项都要是数字并落在它自己的范围里，倍率在 0.1–10 之间';
+    }
+    if (error.status === 401) return describeError(error);
+  }
+  return '保存超时配置失败：' + describeError(error);
+}

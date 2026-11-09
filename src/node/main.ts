@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { DEFAULT_SUMMARY_EVERY_MESSAGES, createChatService } from '../core/chat/service';
 import type { SqlDatabase } from '../core/db/sql';
 import { DEFAULT_HISTORY_MAX_MESSAGES } from '../core/memory/window';
+import { applyTimeoutOverrides, resolveTimeout } from '../core/timeouts';
 import { createProviders } from '../core/providers/index';
 import { createRelayErrorSource, createUnconfiguredErrorSource, type PgErrorsSource } from '../core/pg-errors';
 import { createStoredTts } from '../core/voice/tts';
@@ -78,9 +79,7 @@ const DEFAULT_DB_PATH = '/data/dc-ai-bot.sqlite3';
  */
 const WEB_ROOT = fileURLToPath(new URL('./web/', import.meta.url).toString());
 
-/** 优雅退出总预算：超过就强制结束，别让 systemd/docker 的 SIGKILL 来收尾 */
-const SHUTDOWN_TIMEOUT_MS = 25_000;
-
+/** 优雅退出总预算（默认 25 秒，后台「超时」可改）：超过就强制结束，别让 systemd/docker 的 SIGKILL 来收尾 */
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;
@@ -125,6 +124,8 @@ const keyProber: KeyProber = async (input) => {
 interface RequestHandlers {
   handleInteraction(request: Request): Promise<Response>;
   handleApi(request: Request): Promise<Response>;
+  /** 启动时把后台存过的超时覆盖值装进进程；调用失败只 warn，内置默认照样能用 */
+  loadTimeoutSettings(): Promise<void>;
 }
 
 /**
@@ -225,6 +226,8 @@ function createRequestHandlers(db: SqlDatabase, env: NodeEnv, tracker: TaskTrack
     visionSettings: data.visionSettings,
     // §voice：语音回复的三层配置表（0 关 / 1 按指令 / 2 总是）
     voiceSettings: data.voiceSettings,
+    // 超时配置的后台覆盖值：启动时读一次，之后每次保存由路由自己装进进程
+    timeoutSettings: data.timeoutSettings,
     // 语音合成接口：唯一来源是后台那一行；envPresent 只用于提示老环境变量可以删
     ttsSettings: data.ttsSettings,
     // §voice：三层语气提示词（channel > guild > global），后台可编辑
@@ -289,6 +292,9 @@ function createRequestHandlers(db: SqlDatabase, env: NodeEnv, tracker: TaskTrack
     handleInteraction: (request: Request) =>
       interaction(request, { waitUntil: (task: Promise<unknown>) => tracker.waitUntil(task) }),
     handleApi: (request: Request) => Promise.resolve(app.fetch(request)),
+    loadTimeoutSettings: async (): Promise<void> => {
+      applyTimeoutOverrides(await data.timeoutSettings.get());
+    },
   };
 }
 
@@ -340,10 +346,11 @@ function installShutdownHandlers(deps: { server: ServerType; gateway: NodeGatewa
     if (stopping) return;
     stopping = true;
     console.log('[node] 收到 ' + signal + '，开始优雅退出');
+    const shutdownTimeoutMs = resolveTimeout('shutdown');
     const forced = setTimeout(() => {
-      console.error('[node] 优雅退出超过 ' + String(SHUTDOWN_TIMEOUT_MS) + 'ms，强制结束');
+      console.error('[node] 优雅退出超过 ' + String(shutdownTimeoutMs) + 'ms，强制结束');
       process.exit(1);
-    }, SHUTDOWN_TIMEOUT_MS);
+    }, shutdownTimeoutMs);
 
     void (async (): Promise<void> => {
       try {
@@ -374,7 +381,14 @@ async function start(): Promise<void> {
   const tracker = createTaskTracker((error: unknown) => {
     console.error('[node] 后台任务失败：' + describeError(error));
   });
-  const { handleInteraction, handleApi } = createRequestHandlers(db, env, tracker);
+  const handlers = createRequestHandlers(db, env, tracker);
+  try {
+    await handlers.loadTimeoutSettings();
+  } catch (error) {
+    // 读不到就按 .env 与内置默认跑，不能因为一项配置让机器人起不来
+    console.warn('[node] 读超时配置失败，先用默认值：' + describeError(error));
+  }
+  const { handleInteraction, handleApi } = handlers;
 
   if (!existsSync(WEB_ROOT)) {
     console.warn('[node] 静态目录不存在，管理台页面会全部 404：' + WEB_ROOT);

@@ -129,7 +129,7 @@ export const GATEWAY_STATUS_PATH = '/status';
 export const GATEWAY_SHUTDOWN_PATH = '/shutdown';
 
 /** 引擎版本标记：DO 在每次 alarm 打一次、Node 宿主启动时打一次，用来确认线上跑的是哪一版 */
-export const GATEWAY_BUILD = 'draw-image-4';
+export const GATEWAY_BUILD = 'timeout-config-1';
 
 /** 握手看门狗：连上了却一直没等到 HELLO 时，靠这次 alarm 把宿主再唤醒一次 */
 const HANDSHAKE_WATCHDOG_MS = 15000;
@@ -827,7 +827,8 @@ class GatewayEngineCore {
           judge,
           stylePrompt,
           send: async (audio: Uint8Array): Promise<void> => {
-            await sendVoiceFile.call(channel, message.channelId, audio);
+            // 附件形状由端口声明：gemini 是 WAV、其余是 mp3，发送层不该自己猜
+            await sendVoiceFile.call(channel, message.channelId, audio, tts.file);
           },
           log: (line: string): void => this.#logGateway('warn', line),
           // 成功也留一条 info：事后才知道这条到底发没发、用了什么标签（只记标签与字节数，不记正文）

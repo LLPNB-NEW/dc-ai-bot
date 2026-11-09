@@ -17,6 +17,7 @@ import type {
   ReplySettingsStore,
   RouteRepository,
   SummaryStore,
+  TimeoutSettingsStore,
   TtsSettingsStore,
   TtsStyleStore,
   VisionSettingsStore,
@@ -31,6 +32,16 @@ import {
 import { parseWorldBook, type WorldBookStore } from '../../core/prompt/worldbook';
 import type { PresetImportStore } from '../db/d1-repository';
 import { clampPgErrorsLimit, PG_ERRORS_DEFAULT_LIMIT, PgErrorsUnavailableError, type PgErrorsSource } from '../../core/pg-errors';
+import {
+  MULTIPLIER_MAX,
+  MULTIPLIER_MIN,
+  TIMEOUT_FIELDS,
+  applyTimeoutOverrides,
+  resetTimeouts,
+  resolveTimeout,
+  timeoutDefaults,
+  timeoutSettings,
+} from '../../core/timeouts';
 import type {
   BackupRequest,
   BackfillOutcome,
@@ -169,7 +180,7 @@ const MAX_BODY_EMOJI_GUIDE_CHARS = 8000;
 const MAX_REACTION_TEMPLATE_CHARS = 8000;
 
 // 语音合成接口只有一套全局配置：默认值与上限由 HTTP 层回给后台，前端不抄常量。
-// 模型不再暴露（后台也改不了）：两种方言各自用 core 里的内置默认，这里不再有 model 常量。
+// 模型不再暴露（后台也改不了）：三种方言各自用 core 里的内置默认，这里不再有 model 常量。
 const TTS_URL_PLACEHOLDER = 'https://api.openai.com/v1';
 const TTS_VOICES: readonly string[] = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
 // 第二种上游方言：小米 MiMo 走 OpenAI 形状的 chat/completions，音频在 JSON 里、没有 speed 参数
@@ -185,6 +196,41 @@ const TTS_MIMO_VOICES: readonly string[] = [
   'Chloe',
   'Milo',
   'Dean',
+];
+// 第三种上游方言：同一个 /audio/speech 路径，但返回整段 WAV，中继侧要几十秒才回
+const TTS_GEMINI_URL_PLACEHOLDER = 'https://example.com/pg/v1';
+// 音色名由 Gemini 预置音色定义，后台原样展示，不替用户翻译
+const TTS_GEMINI_VOICES: readonly string[] = [
+  'Kore',
+  'Puck',
+  'Charon',
+  'Fenrir',
+  'Aoede',
+  'Leda',
+  'Orus',
+  'Zephyr',
+  'Callirrhoe',
+  'Autonoe',
+  'Enceladus',
+  'Iapetus',
+  'Umbriel',
+  'Algieba',
+  'Despina',
+  'Erinome',
+  'Algenib',
+  'Rasalgethi',
+  'Laomedeia',
+  'Achernar',
+  'Alnilam',
+  'Schedar',
+  'Gacrux',
+  'Pulcherrima',
+  'Achird',
+  'Zubenelgenubi',
+  'Vindemiatrix',
+  'Sadachbia',
+  'Sadaltager',
+  'Sulafat',
 ];
 
 /** 一种方言的全部默认值：后台按它切换占位地址与音色清单，前端不抄常量（模型内置在 core，不回给后台） */
@@ -212,6 +258,12 @@ const TTS_DIALECTS: readonly TtsDialectOption[] = [
     urlPlaceholder: TTS_MIMO_URL_PLACEHOLDER,
     voices: TTS_MIMO_VOICES,
   },
+  {
+    id: 'gemini',
+    label: 'Gemini（/audio/speech，WAV）',
+    urlPlaceholder: TTS_GEMINI_URL_PLACEHOLDER,
+    voices: TTS_GEMINI_VOICES,
+  },
 ];
 const TTS_MAX_URL_CHARS = 500;
 const TTS_MAX_KEY_CHARS = 500;
@@ -219,6 +271,48 @@ const TTS_MAX_FIELD_CHARS = 100;
 /** 语气提示词的 scope 顺序即后台列表顺序：channel → guild → global */
 const TTS_STYLE_SCOPES: readonly Scope[] = ['channel', 'guild', 'global'];
 const TTS_TEST_TEXT = '你好，我是示例机器人，这是一段语音测试。';
+
+/** 后台「超时」页要的一屏数据：每项的基线、生效值、上下限，加上倍率与三个端点共用的这份形状 */
+function timeoutShape(stored: Record<string, number>): {
+  fields: Array<{
+    key: string;
+    env: string;
+    label: string;
+    detail: string;
+    defaultMs: number;
+    minMs: number;
+    maxMs: number;
+    valueMs: number;
+    effectiveMs: number;
+    overridden: boolean;
+  }>;
+  multiplier: { value: number; default: number; min: number; max: number };
+} {
+  const settings = timeoutSettings();
+  const defaults = timeoutDefaults();
+  return {
+    fields: TIMEOUT_FIELDS.map((field) => ({
+      key: field.key,
+      env: field.env,
+      label: field.label,
+      detail: field.detail,
+      defaultMs: defaults[field.key],
+      minMs: field.minMs,
+      maxMs: field.maxMs,
+      valueMs: settings[field.key],
+      // 生效值已经乘过倍率并被夹进上下限，后台照着它显示「实际等多久」
+      effectiveMs: resolveTimeout(field.key),
+      // 只有库里真的存过这一项才算后台覆盖；和默认相同的值在 PUT 时不会落库
+      overridden: typeof stored[field.key] === 'number',
+    })),
+    multiplier: {
+      value: settings.multiplier,
+      default: defaults.multiplier,
+      min: MULTIPLIER_MIN,
+      max: MULTIPLIER_MAX,
+    },
+  };
+}
 
 export interface AdminAppDeps {
   prompts: PromptRepository;
@@ -245,6 +339,8 @@ export interface AdminAppDeps {
   visionSettings: VisionSettingsStore;
   /** 语音回复的三层配置；GET 连默认值、模式枚举与语速区间一起回，后台不用另存一份常量 */
   voiceSettings: VoiceSettingsStore;
+  /** 超时配置的后台覆盖值：一张 name → value 的平表，缺的项由 core 落回 .env 与内置默认 */
+  timeoutSettings: TimeoutSettingsStore;
   /** 语音合成接口：唯一来源是这张单行表，环境变量只用于提示「可以删了」 */
   ttsSettings: TtsSettingsStore;
   /** 每条语音先判断情绪用的三层语气提示词；GET 连上限一起回，后台不抄常量 */
@@ -1503,6 +1599,55 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     return c.json({ ok: true });
   });
 
+  app.get('/api/timeouts', async (c) => {
+    // 顺手把库里的值重新装进进程：多 isolate / 多进程下这个 isolate 之前可能是旧值
+    const stored = await deps.timeoutSettings.get();
+    applyTimeoutOverrides(stored);
+    return c.json(timeoutShape(stored));
+  });
+
+  app.put('/api/timeouts', async (c) => {
+    const body = await readJsonBody(c);
+    if (body === null) return badRequest(c);
+    const defaults = timeoutDefaults();
+    const next: Record<string, number> = {};
+    // 整份给：少一项就是 400，避免「只提交改过的项」把别的项悄悄打回默认
+    for (const field of TIMEOUT_FIELDS) {
+      const raw = body[field.key];
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) return c.json({ error: 'BAD_TIMEOUT_SETTINGS' }, 400);
+      if (raw < field.minMs || raw > field.maxMs) return c.json({ error: 'BAD_TIMEOUT_SETTINGS' }, 400);
+      next[field.key] = raw;
+    }
+    const rawMultiplier = body['multiplier'];
+    if (typeof rawMultiplier !== 'number' || !Number.isFinite(rawMultiplier)) {
+      return c.json({ error: 'BAD_TIMEOUT_SETTINGS' }, 400);
+    }
+    if (rawMultiplier < MULTIPLIER_MIN || rawMultiplier > MULTIPLIER_MAX) {
+      return c.json({ error: 'BAD_TIMEOUT_SETTINGS' }, 400);
+    }
+    next['multiplier'] = rawMultiplier;
+
+    // 只落库「和基线不一样」的项：改回默认就删行，以后 .env 变了还能重新露出来
+    const stored: Record<string, number> = {};
+    for (const field of TIMEOUT_FIELDS) {
+      const value = next[field.key] ?? 0;
+      if (value !== defaults[field.key]) stored[field.key] = value;
+    }
+    if (rawMultiplier !== defaults.multiplier) stored['multiplier'] = rawMultiplier;
+
+    await deps.timeoutSettings.put(stored);
+    applyTimeoutOverrides(stored);
+    return c.json(timeoutShape(stored));
+  });
+
+  app.delete('/api/timeouts', async (c) => {
+    // 清空 = 恢复 .env 与内置默认；本来没有覆盖也回 200
+    await deps.timeoutSettings.clear();
+    resetTimeouts();
+    const stored = await deps.timeoutSettings.get();
+    return c.json(timeoutShape(stored));
+  });
+
   app.get('/api/reaction-templates', async (c) => {
     // default 与 vars 一起回：后台要展示「三层都没有时时什么样」、还要给 6 个可插入的占位符，前端不再抄一遍
     const items = await deps.reactionTemplates.list();
@@ -1923,7 +2068,8 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     }
     const startedAt = Date.now();
     try {
-      const bytes = await createTts(config).synthesize({
+      const port = createTts(config);
+      const bytes = await port.synthesize({
         text: speechUsed,
         ...(styleUsed === null ? {} : { tag: styleUsed }),
       });
@@ -1931,7 +2077,8 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
         ok: true,
         bytes: bytes.length,
         durationMs: Date.now() - startedAt,
-        contentType: 'audio/mpeg',
+        // 试听页按这个 type 造 Blob：mp3 与 wav 都由端口自己声明
+        contentType: port.file?.contentType ?? 'audio/mpeg',
         audioBase64: encodeBase64(bytes),
         speechUsed,
         styleUsed,

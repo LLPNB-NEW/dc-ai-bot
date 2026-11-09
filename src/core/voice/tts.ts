@@ -1,14 +1,20 @@
 import type { TtsDialect, TtsSettingsSecret } from '../types';
 import type { TtsSettingsStore } from '../ports';
 import { isVoiceSpeed, VOICE_SPEED_DEFAULT } from './settings';
+import { resolveTimeout } from '../timeouts';
 
-/** 语音合成端口：输入一段要说的话，输出 mp3 字节。谁调用谁决定要不要发出去。 */
+/** 语音合成端口：输入一段要说的话，输出音频字节。谁调用谁决定要不要发出去。 */
 export interface TtsPort {
   /**
    * tag 是本条语音的语气标签，形如 (怅然)（normalizeStyleTag 的产物，空串 = 没有语气）。
-   * 只有 mimo 方言能表达它：贴在 assistant 消息最前面；openai 方言没有对应参数，会忽略。
+   * 只有 mimo 方言能表达它：贴在 assistant 消息最前面；openai / gemini 方言没有对应参数，会忽略。
    */
   synthesize(input: { text: string; voice?: string; speed?: number; tag?: string }): Promise<Uint8Array>;
+  /**
+   * 这个端口产出的文件形状：调用方据此决定附件文件名与 content-type。
+   * 省略时调用方按自己的默认值处理（占位实现与只在内存里转发的实现没有产出，不需要声明）。
+   */
+  file?: { name: string; contentType: string };
 }
 
 /**
@@ -32,7 +38,11 @@ export function createUnconfiguredTts(): TtsPort {
 }
 
 /** 方言缺 model 时各自的默认模型：与后台展示的默认值同一口径，前端不抄常量 */
-const DEFAULT_MODEL: Record<TtsDialect, string> = { openai: 'tts-1', mimo: 'mimo-v2.5-tts' };
+const DEFAULT_MODEL: Record<TtsDialect, string> = {
+  openai: 'tts-1',
+  mimo: 'mimo-v2.5-tts',
+  gemini: 'gemini-3.8-flash-tts',
+};
 
 /**
  * 后台配置 -> 合成配置：url 或 key 空白都算未配置（返回 null）。
@@ -43,8 +53,9 @@ export function ttsConfigFrom(settings: TtsSettingsSecret, fetchImpl?: typeof fe
   const url = settings.url.trim();
   const key = settings.key.trim();
   if (url === '' || key === '') return null;
-  // 库里只有两个合法值，脏数据一律按 openai（与仓储读侧同一口径）
-  const dialect: TtsDialect = settings.dialect === 'mimo' ? 'mimo' : 'openai';
+  // 库里只有三个合法值，脏数据一律按 openai（与仓储读侧同一口径）
+  const dialect: TtsDialect =
+    settings.dialect === 'mimo' ? 'mimo' : settings.dialect === 'gemini' ? 'gemini' : 'openai';
   // 模型不再由后台决定：一律按方言取内置默认，库里的 model 列只留作历史数据
   const voice = settings.voice.trim();
   const config: TtsConfig = { dialect, url, key, model: DEFAULT_MODEL[dialect] };
@@ -81,7 +92,7 @@ export function createStoredTts(store: TtsSettingsStore, fetchImpl?: typeof fetc
   };
 }
 
-/** 一份合成配置：dialect 决定往哪儿发、body 长什么样，其余字段两种方言共用 */
+/** 一份合成配置：dialect 决定往哪儿发、body 长什么样，其余字段三种方言共用 */
 export interface TtsConfig {
   /** 省略按 openai：只关心 OpenAI 形状的调用方不必被迫写这个字段 */
   dialect?: TtsDialect;
@@ -94,8 +105,8 @@ export interface TtsConfig {
   fetchImpl?: typeof fetch;
 }
 
-/** 合成接口默认超时：TTS 慢到 30 秒还不回，这条回复就不值得再等了 */
-const TTS_TIMEOUT_MS = 30_000;
+// 合成超时都走 core/timeouts：默认 30 秒，gemini 那条默认 120 秒（整段音频合成完才回），
+// 两项都能在后台「超时」页改，也可能被全局倍率一起放大。
 
 /** 去尾斜杠：后台常常把地址贴成末尾带斜杠的样子，两种方言共用这一段 */
 function trimTrailingSlash(url: string): string {
@@ -165,6 +176,7 @@ export function createOpenAiTts(config: TtsConfig): TtsPort {
   const defaultVoice = config.voice !== undefined && config.voice.trim() !== '' ? config.voice : undefined;
 
   return {
+    file: { name: 'voice.mp3', contentType: 'audio/mpeg' },
     async synthesize(input: {
       text: string;
       voice?: string;
@@ -194,7 +206,7 @@ export function createOpenAiTts(config: TtsConfig): TtsPort {
             'content-type': 'application/json',
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
+          signal: AbortSignal.timeout(resolveTimeout('tts')),
         });
       } catch (error) {
         throw new TtsUnavailableError('TTS_REQUEST_FAILED: ' + (error instanceof Error ? error.message : String(error)));
@@ -226,6 +238,7 @@ export function createMimoTts(config: TtsConfig): TtsPort {
   const defaultVoice = config.voice !== undefined && config.voice.trim() !== '' ? config.voice : undefined;
 
   return {
+    file: { name: 'voice.mp3', contentType: 'audio/mpeg' },
     async synthesize(input: {
       text: string;
       voice?: string;
@@ -254,7 +267,7 @@ export function createMimoTts(config: TtsConfig): TtsPort {
             'content-type': 'application/json',
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
+          signal: AbortSignal.timeout(resolveTimeout('tts')),
         });
       } catch (error) {
         throw new TtsUnavailableError('TTS_REQUEST_FAILED: ' + (error instanceof Error ? error.message : String(error)));
@@ -301,9 +314,68 @@ export function createMimoTts(config: TtsConfig): TtsPort {
 }
 
 /**
+ * Gemini 的 /audio/speech：路径与 openai 方言相同，但返回的是整段 WAV（RIFF 头 + PCM），
+ * 不是 mp3、也不分块流式回。speed 与 tag 它都没有对应参数，这里显式忽略（不是漏传）：
+ * 硬塞进 input 会被念出来，而 gemini 的语速只能由音色带。
+ */
+export function createGeminiTts(config: TtsConfig): TtsPort {
+  const doFetch = resolveFetch(config.fetchImpl);
+  const defaultVoice = config.voice !== undefined && config.voice.trim() !== '' ? config.voice : undefined;
+
+  return {
+    file: { name: 'voice.wav', contentType: 'audio/wav' },
+    async synthesize(input: {
+      text: string;
+      voice?: string;
+      speed?: number;
+      tag?: string;
+    }): Promise<Uint8Array> {
+      const requested = input.voice !== undefined && input.voice.trim() !== '' ? input.voice : undefined;
+      const voice = requested ?? defaultVoice;
+
+      const body: Record<string, unknown> = {
+        model: config.model,
+        input: input.text,
+        response_format: 'wav',
+      };
+      if (voice !== undefined) body.voice = voice;
+
+      let response: Response;
+      try {
+        response = await doFetch(speechUrl(config.url), {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer ' + config.key,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(resolveTimeout('ttsGemini')),
+        });
+      } catch (error) {
+        throw new TtsUnavailableError('TTS_REQUEST_FAILED: ' + (error instanceof Error ? error.message : String(error)));
+      }
+
+      if (!response.ok) {
+        let text = '';
+        try {
+          text = await response.text();
+        } catch {
+          text = '';
+        }
+        throw new TtsUnavailableError('TTS_HTTP ' + String(response.status) + ': ' + describeBody(text));
+      }
+
+      return new Uint8Array(await response.arrayBuffer());
+    },
+  };
+}
+
+/**
  * 统一入口：调用方（每轮回复、后台试听）只认这一个函数，上游有几种请求形状由这里分派，
- * 加第三种方言时也只改这里，不必回头改调用点。
+ * 加一种方言时也只改这里，不必回头改调用点。
  */
 export function createTts(config: TtsConfig): TtsPort {
-  return config.dialect === 'mimo' ? createMimoTts(config) : createOpenAiTts(config);
+  if (config.dialect === 'mimo') return createMimoTts(config);
+  if (config.dialect === 'gemini') return createGeminiTts(config);
+  return createOpenAiTts(config);
 }

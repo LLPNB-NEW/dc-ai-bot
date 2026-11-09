@@ -1,5 +1,6 @@
 import type { ChatTool, ChatToolCall } from '../types';
 import { resolveBaseUrl } from '../providers/rt';
+import { resolveTimeout } from '../timeouts';
 
 /**
  * 生图工具：只有预设里真写了 `draw_image` 才下发（与 story_reply 同一套门控）。
@@ -17,9 +18,7 @@ export const IMAGE_MODEL_NAME = 'gemini-3.1-flash-image';
 /** prompt 上限与中继侧一致；超了截断，不因此判整轮失败 */
 export const IMAGE_PROMPT_MAX_CHARS = 8000;
 
-/** 生图比聊天慢（实测 10–30 秒），给足预算；超时按这一把 Key 失败处理 */
-const IMAGE_TIMEOUT_MS = 180_000;
-
+/** 生图比聊天慢（实测 10–30 秒），默认给 180 秒；超时按这一把 Key 失败处理 */
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
 export function drawTool(): ChatTool {
@@ -100,7 +99,7 @@ export async function requestImage(options: {
       n: 1,
       response_format: 'b64_json',
     }),
-    signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS),
+    signal: AbortSignal.timeout(resolveTimeout('image')),
   });
   // 先读 text 再 parse：失败时才有原文可报（response.json() 的报错不带正文）
   const text = await response.text();

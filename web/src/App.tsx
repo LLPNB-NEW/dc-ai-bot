@@ -13,6 +13,7 @@ import BackupPage from './pages/BackupPage';
 import ReplyPage from './pages/ReplyPage';
 import VoicePage from './pages/VoicePage';
 import ErrorsPage from './pages/ErrorsPage';
+import TimeoutsPage from './pages/TimeoutsPage';
 
 type Phase = 'checking' | 'anonymous' | 'authed';
 type Tab =
@@ -25,6 +26,7 @@ type Tab =
   | 'backup'
   | 'voice'
   | 'reply'
+  | 'timeouts'
   | 'errors'
   | 'keys'
   | 'logs';
@@ -39,6 +41,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'backup', label: '备份' },
   { id: 'voice', label: '语音' },
   { id: 'reply', label: '回复' },
+  { id: 'timeouts', label: '超时' },
   { id: 'errors', label: '故障' },
   { id: 'keys', label: '供应商密钥' },
   { id: 'logs', label: '实时日志' },
@@ -99,6 +102,7 @@ export default function App() {
         {tab === 'backup' ? <BackupPage /> : null}
         {tab === 'voice' ? <VoicePage /> : null}
         {tab === 'reply' ? <ReplyPage /> : null}
+        {tab === 'timeouts' ? <TimeoutsPage /> : null}
         {tab === 'errors' ? <ErrorsPage /> : null}
         {tab === 'keys' ? <KeysPage /> : null}
         {tab === 'logs' ? <LogsPage /> : null}

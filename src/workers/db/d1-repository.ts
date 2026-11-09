@@ -15,6 +15,7 @@ import type {
   RouteRepository,
   SecretBox,
   SummaryStore,
+  TimeoutSettingsStore,
   TtsSettingsStore,
   TtsStyleStore,
   VisionSettingsStore,
@@ -690,6 +691,7 @@ export function createRepositories(
   summaries: SummaryStore;
   channelMemory: ChannelMemoryStore;
   reactionModels: ReactionModelStore;
+  timeoutSettings: TimeoutSettingsStore;
   ttsSettings: TtsSettingsStore;
   ttsStyles: TtsStyleStore;
   reactionGuides: ReactionGuideStore;
@@ -1769,7 +1771,8 @@ export function createRepositories(
       const key = row.key_sealed === '' ? '' : await secretBox.decrypt(row.key_sealed);
       const judgeKey = row.judge_key_sealed === '' ? '' : await secretBox.decrypt(row.judge_key_sealed);
       // 列上已有 CHECK，仍在这里收窄：脏数据最多让请求走回 openai，而不是把未知方言带进运行时
-      const dialect = row.dialect === 'mimo' ? 'mimo' : 'openai';
+      const dialect =
+        row.dialect === 'mimo' ? 'mimo' : row.dialect === 'gemini' ? 'gemini' : 'openai';
       return {
         dialect,
         url: row.url,
@@ -1817,10 +1820,18 @@ export function createRepositories(
       const judgeUrl = input.judgeUrl === undefined ? (previous?.judge_url ?? '') : input.judgeUrl.trim();
       const judgeModel = input.judgeModel === undefined ? (previous?.judge_model ?? '') : input.judgeModel.trim();
       // 省略 dialect = 不改方言（老前端只改 url/model 时不该把 MiMo 打回 openai）；旧行为空按 openai
-      const storedDialect = previous?.dialect === 'mimo' ? 'mimo' : 'openai';
+      const storedDialect =
+        previous?.dialect === 'mimo' ? 'mimo' : previous?.dialect === 'gemini' ? 'gemini' : 'openai';
       const requestedDialect = (input.dialect ?? '').trim();
       // 显式给了就用给的；不认识的词进不了库（路由层已挡 400，列上还有 CHECK），这里只做兜底收窄
-      const dialect = requestedDialect === '' ? storedDialect : requestedDialect === 'mimo' ? 'mimo' : 'openai';
+      const dialect =
+        requestedDialect === ''
+          ? storedDialect
+          : requestedDialect === 'mimo'
+            ? 'mimo'
+            : requestedDialect === 'gemini'
+              ? 'gemini'
+              : 'openai';
       const updatedAt = nowIso();
       // model 列保留不动：后台已不再传它，旧值原样留着，合成侧也不会读
       const model = previous?.model ?? '';
@@ -1850,6 +1861,40 @@ export function createRepositories(
     async remove(): Promise<void> {
       // 删整行 = 回到「未配置」；命中 0 行也算成功
       await db.prepare('DELETE FROM tts_settings WHERE id = 1').run();
+    },
+  };
+
+  const timeoutSettings: TimeoutSettingsStore = {
+    // 一张 name → value 的平表：读出来的只有「后台真的存过的项」，缺的由 core 落回 .env 与内置默认
+    async get(): Promise<Record<string, number>> {
+      const rows = await db
+        .prepare('SELECT name, value FROM timeout_settings')
+        .all<{ name: string; value: number }>();
+      const values: Record<string, number> = {};
+      for (const row of rows.results ?? []) {
+        // 列上是 REAL NOT NULL，脏到不是有限数就当没存过，别让 NaN 顺着倍率传下去
+        if (typeof row.value !== 'number' || !Number.isFinite(row.value)) continue;
+        values[row.name] = row.value;
+      }
+      return values;
+    },
+
+    async put(values: Record<string, number>): Promise<void> {
+      // 整份替换：先清空再写，调用方给的就是最终状态，不会留下上一版多出来的键
+      const updatedAt = nowIso();
+      const statements = [db.prepare('DELETE FROM timeout_settings')];
+      for (const [name, value] of Object.entries(values)) {
+        if (!Number.isFinite(value)) continue;
+        statements.push(
+          db.prepare('INSERT INTO timeout_settings (name, value, updated_at) VALUES (?, ?, ?)').bind(name, value, updatedAt),
+        );
+      }
+      await db.batch(statements);
+    },
+
+    async clear(): Promise<void> {
+      // 空表也算成功：恢复默认是幂等动作
+      await db.prepare('DELETE FROM timeout_settings').run();
     },
   };
 
@@ -1903,6 +1948,7 @@ export function createRepositories(
     summaries,
     channelMemory,
     reactionModels,
+    timeoutSettings,
     ttsSettings,
     ttsStyles,
     reactionGuides,

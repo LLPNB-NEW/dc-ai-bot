@@ -244,6 +244,19 @@ export interface TtsSettingsStore {
 }
 
 /**
+ * 超时配置的后台覆盖值：一张 name → value 的键值表，全局只有一套。
+ * 读出来的就是「后台存过的项」，没存过的项由 core 落回 .env 与内置默认；倍率也存在同一张表里（键名 multiplier）。
+ */
+export interface TimeoutSettingsStore {
+  /** 后台存过的全部键值；空表返回空对象 */
+  get(): Promise<Record<string, number>>;
+  /** 整份替换：先清空再写，调用方给的就是最终状态 */
+  put(values: Record<string, number>): Promise<void>;
+  /** 删掉所有覆盖 = 恢复 .env 与内置默认；空表也静默成功 */
+  clear(): Promise<void>;
+}
+
+/**
  * 每条语音先判断情绪用的语气提示词：channel / guild / global 各至多一行，命中哪层用哪层。
  * trim 空的内容由 HTTP 层转成删行；仓储只管原样存取，不做「空 = 没配」的合并。
  */

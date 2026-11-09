@@ -1,6 +1,5 @@
 import type { LlmResult, ProviderId, ProviderRuntime } from '../types';
-
-export const TIMEOUT_MS = 180_000;
+import { resolveTimeout } from '../timeouts';
 
 /** §19.7：一次调用最多两次尝试——只加一层重试，不做指数退避队列 */
 export const MAX_ATTEMPTS = 2;
@@ -23,19 +22,20 @@ interface SignalHandle {
 const noop = (): void => undefined;
 
 /**
- * 180s（3 分钟）超时与调用方 signal 合并。release 在响应头到达后立即解绑：
+ * 默认 180s（3 分钟，后台「超时」可改）与调用方 signal 合并。release 在响应头到达后立即解绑：
  * 超时只约束建连与首字节——全量历史下深度思考模型常要 25s 以上才吐第一个字节，30s 会误杀；
  * 响应头一到就解绑，长 SSE 流不会被中途砍断。
  */
 export function createRequestSignal(rt: ProviderRuntime): SignalHandle {
   const statics = AbortSignal as unknown as AbortSignalStatics;
-  const timeout = statics.timeout?.(TIMEOUT_MS);
+  const timeoutMs = resolveTimeout('llm');
+  const timeout = statics.timeout?.(timeoutMs);
   const external = rt.signal;
   if (timeout && !external) return { signal: timeout, release: noop };
   if (timeout && external && statics.any) return { signal: statics.any([timeout, external]), release: noop };
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('timeout after ' + TIMEOUT_MS + 'ms')), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(new Error('timeout after ' + String(timeoutMs) + 'ms')), timeoutMs);
   const forward = (): void => controller.abort(external?.reason);
   if (external) {
     if (external.aborted) forward();

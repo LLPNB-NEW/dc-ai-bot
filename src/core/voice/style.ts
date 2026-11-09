@@ -1,4 +1,5 @@
 import type { TtsStyleLayer } from '../types';
+import { judgeTimeoutMs } from '../timeouts';
 import { isVoiceDirector, VOICE_DIRECTOR_FREE, VOICE_DIRECTOR_OFF, VOICE_DIRECTOR_TAGS } from './settings';
 
 /** 语气提示词的上限：一份提示词不该比一段正文还长，超了多半是贴错了东西 */
@@ -28,17 +29,8 @@ export interface TtsStyleJudgeConfig {
 /**
  * 判断情绪的超时：模型要把整段正文念一遍再抄回来，耗时随字数线性增长。
  * 固定 8 秒在生产上把 150 字的真实回复整条掐断（实测这条要 8.1 秒才回），
- * 于是按字数给预算：15 秒起步、每字 40 毫秒、最多 45 秒。
+ * 于是按字数给预算：默认 15 秒起步、每字 40 毫秒、最多 45 秒，三档都能在后台「超时」改（`judgeTimeoutMs`）。
  */
-const JUDGE_TIMEOUT_FLOOR_MS = 15_000;
-const JUDGE_TIMEOUT_PER_CHAR_MS = 40;
-const JUDGE_TIMEOUT_CAP_MS = 45_000;
-
-/** 这次判断该等多久：字数越多给得越多，封顶防跑飞 */
-function judgeTimeoutMs(chars: number): number {
-  const scaled = JUDGE_TIMEOUT_FLOOR_MS + Math.max(0, chars) * JUDGE_TIMEOUT_PER_CHAR_MS;
-  return scaled < JUDGE_TIMEOUT_CAP_MS ? scaled : JUDGE_TIMEOUT_CAP_MS;
-}
 /**
  * 判断情绪的输出上限：模型要把正文原样抄回来，而正文本身不设字数上限，
  * 上限只防跑飞；真抄不全也只是逐字校验不过、标签留着、正文退回原文。

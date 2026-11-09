@@ -1,4 +1,5 @@
 import type { PgErrorEntry, PgErrorFeed } from './types';
+import { resolveTimeout } from './timeouts';
 
 /** 中继与后台共用的条数区间：缺省 200、上限 200、下限 1 */
 export const PG_ERRORS_DEFAULT_LIMIT = 200;
@@ -7,8 +8,6 @@ export const PG_ERRORS_MIN_LIMIT = 1;
 
 /** message 只是给人看的一句话，超过这个长度就不再往后台搬 */
 export const PG_ERRORS_MESSAGE_MAX_CHARS = 500;
-
-const DEFAULT_TIMEOUT_MS = 5000;
 
 /** 越界夹紧而不是报错：坏数字回落到缺省值，其余夹到 1..200 */
 export function clampPgErrorsLimit(value: number): number {
@@ -113,7 +112,7 @@ function isTimeout(error: unknown): boolean {
  */
 export function createRelayErrorSource(options: RelayErrorSourceOptions): PgErrorsSource {
   const base = options.url.trim().replace(/\/+$/, '');
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? resolveTimeout('pgErrors');
 
   return {
     configured: true,

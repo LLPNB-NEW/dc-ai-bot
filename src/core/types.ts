@@ -514,8 +514,12 @@ export interface VoiceSettingsConfig {
   updatedAt: string;
 }
 
-/** 语音合成的上游方言：openai = POST {url}/audio/speech，mimo = POST {url}/chat/completions */
-export type TtsDialect = 'openai' | 'mimo';
+/**
+ * 语音合成的上游方言：openai = POST {url}/audio/speech（mp3），
+ * mimo = POST {url}/chat/completions（JSON 里的 base64 mp3），
+ * gemini = POST {url}/audio/speech（整段 WAV，超时放宽）。
+ */
+export type TtsDialect = 'openai' | 'mimo' | 'gemini';
 
 /** 语音合成接口（TTS）的运行时配置：key / judgeKey 是解密后的明文，只在仓储内部与运行时出现 */
 export interface TtsSettingsSecret {

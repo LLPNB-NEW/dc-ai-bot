@@ -298,8 +298,8 @@ export default function VoicePage() {
     !ttsDialectOption.voices.includes(ttsSettings.voice)
       ? ttsDialectOption.voices.concat([ttsSettings.voice])
       : ttsDialectOption.voices;
-  // MiMo 走 chat/completions，没有语速参数：语速只影响 OpenAI 兼容那套。
-  const ttsSpeedIgnored = ttsDialectOption.id === 'mimo';
+  // 只有 OpenAI 兼容那套有语速参数：MiMo 没有，Gemini 的语速只能由音色带。
+  const ttsSpeedIgnored = ttsDialectOption.id !== 'openai';
   const ttsSaveDisabled = ttsBusy !== '' || ttsUrl.trim() === '';
 
   async function saveTts(): Promise<void> {
@@ -608,7 +608,11 @@ export default function VoicePage() {
           <span>接口类型</span>
           <select
             value={ttsDialect}
-            onChange={(event) => selectTtsDialect(event.target.value === 'mimo' ? 'mimo' : 'openai')}
+            onChange={(event) =>
+              selectTtsDialect(
+                event.target.value === 'mimo' ? 'mimo' : event.target.value === 'gemini' ? 'gemini' : 'openai',
+              )
+            }
           >
             {ttsDefaults.dialects.map((option) => (
               <option key={option.id} value={option.id}>
@@ -740,7 +744,7 @@ export default function VoicePage() {
         <p className="hint">
           0 = 关闭（默认），1 = 她说了才发（回复里出现 <code>[[voice]]</code> 才发），2 = 每条回复都发。
         </p>
-        <p className="hint">语音是整段回复合成后作为单独一条 mp3 附件发出去，不跟着假流式切片走。</p>
+        <p className="hint">语音是整段回复合成后作为单独一条音频附件发出去（mp3 或 wav），不跟着假流式切片走。</p>
         <p className="voice-warn">TTS 没配时这里存了也不会发声音——去上面的「语音合成接口」配。</p>
         <ScopeField
           scope={voiceScope}
@@ -808,7 +812,7 @@ export default function VoicePage() {
           </label>
         </div>
         {ttsSpeedIgnored ? (
-          <p className="voice-warn">MiMo 不支持语速，此项不生效</p>
+          <p className="voice-warn">当前方言不支持语速，此项不生效</p>
         ) : parsedVoiceSpeed === null ? (
           <p className="hint">
             语速要填 {String(voiceSpeedMin)}–{String(voiceSpeedMax)} 的整数（%）

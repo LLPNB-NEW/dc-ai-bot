@@ -11,6 +11,7 @@
  */
 import { DEFAULT_SUMMARY_EVERY_MESSAGES, createChatService } from '../core/chat/service';
 import { DEFAULT_HISTORY_MAX_MESSAGES } from '../core/memory/window';
+import { applyTimeoutOverrides } from '../core/timeouts';
 import { createProviders } from '../core/providers/index';
 import { createStoredTts } from '../core/voice/tts';
 import type { SqlDatabase } from '../core/db/sql';
@@ -178,11 +179,25 @@ function createDataLayer(env: Env) {
   return createRepositories(env.DB, secretBox);
 }
 
-function handleInteraction(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+/**
+ * 超时覆盖值存在 D1 里，而 resolveTimeout 读的是进程内状态：
+ * 每个 isolate 在处理请求前顺手把它读回来，后台保存之后最多晚一条请求生效，不会用到永久过期的值。
+ * 读失败只 warn：超时配置读不到不该让消息回不出去。
+ */
+async function loadTimeoutSettings(data: ReturnType<typeof createDataLayer>): Promise<void> {
+  try {
+    applyTimeoutOverrides(await data.timeoutSettings.get());
+  } catch (error) {
+    console.warn('[timeouts] 读超时配置失败，先用默认值：' + describeError(error));
+  }
+}
+
+async function handleInteraction(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const missing = firstMissingSecret(env, DISCORD_SECRETS);
-  if (missing !== null) return Promise.resolve(missingSecretResponse(missing));
+  if (missing !== null) return missingSecretResponse(missing);
 
   const data = createDataLayer(env);
+  await loadTimeoutSettings(data);
   // §19.9：入口与网关共用同一份 D1 环形表；写日志搭 waitUntil 的便车，失败只 warn（§19.1）
   const logStore = createLogStore(env.DB);
   const sink = (entry: LogEntry): void => {
@@ -222,15 +237,16 @@ function handleInteraction(request: Request, env: Env, ctx: ExecutionContext): P
   return handler(request, { waitUntil: (promise: Promise<unknown>) => ctx.waitUntil(promise) });
 }
 
-function handleApi(request: Request, env: Env, ctx: ExecutionContext, pathname: string): Promise<Response> {
+async function handleApi(request: Request, env: Env, ctx: ExecutionContext, pathname: string): Promise<Response> {
   const missing = firstMissingSecret(env, API_SECRETS);
   if (missing !== null) {
     // 缺 secret 时正是最需要健康检查的时候，这一条走本地兜底
-    if (pathname === '/api/health') return Promise.resolve(jsonResponse({ ok: true, version: APP_VERSION }, 200));
-    return Promise.resolve(missingSecretResponse(missing));
+    if (pathname === '/api/health') return jsonResponse({ ok: true, version: APP_VERSION }, 200);
+    return missingSecretResponse(missing);
   }
 
   const data = createDataLayer(env);
+  await loadTimeoutSettings(data);
   // §63：后台摘要入口也要写日志（与网关共用同一份环形表），写失败只 warn（§19.1）
   const logStore = createLogStore(env.DB);
   const sink = (entry: LogEntry): void => {
@@ -263,6 +279,8 @@ function handleApi(request: Request, env: Env, ctx: ExecutionContext, pathname: 
     visionSettings: data.visionSettings,
     // §voice：语音回复的三层配置表（0 关 / 1 按指令 / 2 总是）
     voiceSettings: data.voiceSettings,
+    // 超时配置的后台覆盖值：每次请求前重读一次，后台保存后本 isolate 立刻跟上
+    timeoutSettings: data.timeoutSettings,
     // 语音合成接口：唯一来源是后台那一行；envPresent 只用于提示老环境变量可以删
     ttsSettings: data.ttsSettings,
     // §voice：三层语气提示词（channel > guild > global），后台可编辑
@@ -321,7 +339,7 @@ function handleApi(request: Request, env: Env, ctx: ExecutionContext, pathname: 
       return pruneDiscordMessage({ botToken: env.DISCORD_BOT_TOKEN ?? '' }, target);
     },
   });
-  return Promise.resolve(app.fetch(request));
+  return app.fetch(request);
 }
 
 /**

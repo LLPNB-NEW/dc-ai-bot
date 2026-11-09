@@ -41,6 +41,8 @@ const EXPECTED_FILES = [
   '0029_world_books.sql',
   '0030_context_tool_mode.sql',
   '0031_body_emoji_guides.sql',
+  '0032_tts_gemini_dialect.sql',
+  '0033_timeout_settings.sql',
 ];
 
 const ROOT = mkdtempSync(join(tmpdir(), 'dc-ai-bot-migrate-'));
@@ -61,7 +63,7 @@ afterAll(() => {
 });
 
 describe('runMigrations', () => {
-  it('30 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
+  it('33 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
     const filePath = newDbPath();
     const first = await runMigrations(filePath, MIGRATIONS_DIR);
     expect(first.applied).toEqual(EXPECTED_FILES);
@@ -229,6 +231,86 @@ describe('runMigrations', () => {
 
     // CHECK 是最后一道闸：绕过接口直接写脏 scope 必须失败，不能落库后让读侧去猜
     await expect(insert.bind('team', '', 'x', '{}', 0, '2026-01-01T00:00:03.000Z').run()).rejects.toThrow();
+  });
+
+  it('0032 重建 tts_settings：老行十二列原样保留，gemini 可写，脏方言被 CHECK 拒', async () => {
+    // 先用 0001..0031 建出旧形态的库（CHECK 只认 openai/mimo），写进一行，再单独跑 0032
+    const before = join(ROOT, 'migrations-before-0032');
+    mkdirSync(before, { recursive: true });
+    for (const name of EXPECTED_FILES.filter((file) => file < '0032')) {
+      copyFileSync(join(MIGRATIONS_DIR, name), join(before, name));
+    }
+    const filePath = newDbPath();
+    expect((await runMigrations(filePath, before)).applied).toHaveLength(31);
+
+    const db = createSqliteDatabase(filePath);
+    await db
+      .prepare('INSERT INTO tts_settings (id, url, key_sealed, key_hint, model, voice, updated_at, dialect, judge_url, judge_key_sealed, judge_key_hint, judge_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(
+        1,
+        'https://api.xiaomimimo.com/v1',
+        'sealed-key',
+        'sk-...abcd',
+        'mimo-v2.5-tts',
+        '冰糖',
+        '2026-01-01T00:00:00.000Z',
+        'mimo',
+        'https://judge.example/v1',
+        'sealed-judge',
+        'sk-...efgh',
+        'judge-model',
+      )
+      .run();
+
+    const only = join(ROOT, 'migrations-0032-only');
+    mkdirSync(only, { recursive: true });
+    copyFileSync(join(MIGRATIONS_DIR, '0032_tts_gemini_dialect.sql'), join(only, '0032_tts_gemini_dialect.sql'));
+    expect((await runMigrations(filePath, only)).applied).toEqual(['0032_tts_gemini_dialect.sql']);
+
+    // 重建是 DROP + RENAME：十二列必须逐字搬过来，judge_* 这几列最容易在重建时漏掉
+    const row = await db.prepare('SELECT * FROM tts_settings WHERE id = 1').first();
+    expect(row).toEqual({
+      id: 1,
+      url: 'https://api.xiaomimimo.com/v1',
+      key_sealed: 'sealed-key',
+      key_hint: 'sk-...abcd',
+      model: 'mimo-v2.5-tts',
+      voice: '冰糖',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      dialect: 'mimo',
+      judge_url: 'https://judge.example/v1',
+      judge_key_sealed: 'sealed-judge',
+      judge_key_hint: 'sk-...efgh',
+      judge_model: 'judge-model',
+    });
+
+    const columns = await db.prepare('PRAGMA table_info(tts_settings)').all<{ name: string; notnull: number }>();
+    expect(columns.results.map((column) => column.name)).toEqual([
+      'id',
+      'url',
+      'key_sealed',
+      'key_hint',
+      'model',
+      'voice',
+      'updated_at',
+      'dialect',
+      'judge_url',
+      'judge_key_sealed',
+      'judge_key_hint',
+      'judge_model',
+    ]);
+
+    // 新 CHECK 收下 gemini
+    await db.prepare('UPDATE tts_settings SET dialect = ? WHERE id = 1').bind('gemini').run();
+    const gemini = await db.prepare('SELECT dialect FROM tts_settings WHERE id = 1').first<{ dialect: string }>();
+    expect(gemini).toEqual({ dialect: 'gemini' });
+
+    // CHECK 是最后一道闸：脏方言必须失败，不能落库后让读侧去猜
+    await expect(db.prepare('UPDATE tts_settings SET dialect = ? WHERE id = 1').bind('openai2').run()).rejects.toThrow();
+    // 单行约束随重建一起回来
+    await expect(
+      db.prepare('INSERT INTO tts_settings (id) VALUES (?)').bind(2).run(),
+    ).rejects.toThrow();
   });
 
   it('0013 把旧的 system_prompt/persona 搬成两段，并 DROP 掉提示词表的两列', async () => {

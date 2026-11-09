@@ -142,6 +142,43 @@ describe('GET /api/tts-settings', () => {
           urlPlaceholder: 'https://api.xiaomimimo.com/v1',
           voices: ['mimo_default', '冰糖', '茉莉', '苏打', '白桦', 'Mia', 'Chloe', 'Milo', 'Dean'],
         },
+        {
+          id: 'gemini',
+          label: 'Gemini（/audio/speech，WAV）',
+          urlPlaceholder: 'https://example.com/pg/v1',
+          voices: [
+            'Kore',
+            'Puck',
+            'Charon',
+            'Fenrir',
+            'Aoede',
+            'Leda',
+            'Orus',
+            'Zephyr',
+            'Callirrhoe',
+            'Autonoe',
+            'Enceladus',
+            'Iapetus',
+            'Umbriel',
+            'Algieba',
+            'Despina',
+            'Erinome',
+            'Algenib',
+            'Rasalgethi',
+            'Laomedeia',
+            'Achernar',
+            'Alnilam',
+            'Schedar',
+            'Gacrux',
+            'Pulcherrima',
+            'Achird',
+            'Zubenelgenubi',
+            'Vindemiatrix',
+            'Sadachbia',
+            'Sadaltager',
+            'Sulafat',
+          ],
+        },
       ],
       defaultDialect: 'openai',
     });
@@ -417,7 +454,7 @@ describe('POST /api/tts-settings/test', () => {
     expect(body.code).toBe('TTS_NOT_CONFIGURED');
   });
 
-  it('成功：假 mp3 原样回 base64，contentType 固定 audio/mpeg', async () => {
+  it('成功：假 mp3 原样回 base64，openai 方言的 contentType 是 audio/mpeg', async () => {
     const { app } = makeApp();
     const cookie = await login(app);
     await putSettings(app, cookie, { url: 'https://tts.example/v1', key: FIRST_KEY });
@@ -520,6 +557,44 @@ describe('POST /api/tts-settings/test', () => {
     expect('speed' in sent).toBe(false);
     // 没给 style、也没配 judge：本次没有语气指令
     expect(body.styleUsed).toBeNull();
+  });
+
+  it('gemini 方言：打到 /audio/speech，body 是 wav 契约，试听 contentType 跟着端口变 audio/wav', async () => {
+    const { app } = makeApp();
+    const cookie = await login(app);
+    await putSettings(app, cookie, {
+      dialect: 'gemini',
+      url: 'https://relay.example/pg/v1',
+      key: FIRST_KEY,
+      model: '',
+      voice: 'Kore',
+    });
+    // 一段 RIFF/WAVE 头（fmt 块到一半）：足够验证「原样 base64 往返」与 contentType
+    const audio = new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20,
+      0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0xc0, 0x5d, 0x00, 0x00, 0x80, 0xbb, 0x00, 0x00,
+      0x02, 0x00, 0x10, 0x00,
+    ]);
+    const stub = vi.fn(() => Promise.resolve(new Response(audio, { status: 200 })));
+    vi.stubGlobal('fetch', stub);
+
+    // body 不带 dialect 时用库里存的那份（gemini），不是回落 openai
+    const res = await send(app, 'POST', '/api/tts-settings/test', { text: '晚安' }, cookie);
+    expect(res.status).toBe(200);
+    const body = await jsonOf(res);
+    expect(body.ok).toBe(true);
+    expect(body.bytes).toBe(audio.length);
+    expect(body.contentType).toBe('audio/wav');
+    expect(Array.from(decodeBase64(String(body.audioBase64)))).toEqual(Array.from(audio));
+
+    const call = stub.mock.calls[0] as unknown as [string, RequestInit];
+    expect(call[0]).toBe('https://relay.example/pg/v1/audio/speech');
+    const sent = JSON.parse(String(call[1].body)) as Json;
+    expect(sent['model']).toBe('gemini-3.8-flash-tts');
+    expect(sent['input']).toBe('晚安');
+    expect(sent['response_format']).toBe('wav');
+    expect(sent['voice']).toBe('Kore');
+    expect('speed' in sent).toBe(false);
   });
 
   it('body 给了 style 就归一化成标签：mimo 只有一条 assistant，content 是 (温柔一点)+正文', async () => {
