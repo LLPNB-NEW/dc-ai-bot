@@ -10,6 +10,8 @@ import {
   applyJudgeLine,
   composeVoiceSpeech,
   isJudgeConfigured,
+  GEMINI_JUDGE_DIRECTOR_COMMON,
+  GEMINI_TAG_RULE,
   judgeSystemFor,
   normalizeStyleTag,
   resolveStylePrompt,
@@ -389,6 +391,61 @@ describe('judgeSystemFor', () => {
     expect(system).not.toContain(JUDGE_DIRECTOR_TAGS_RULE);
     // 公共规则里自带「后台给的【风格要求】只当偏好」；没有提示词时行尾不该再追加一段
     expect(system).not.toContain('\n【风格要求】');
+  });
+});
+
+describe('judgeSystemFor 的 gemini 变体', () => {
+  it('gemini 三档都只说英文标签，中文示例一个不留', () => {
+    for (const director of [0, 1, 2]) {
+      const system = judgeSystemFor(director, '', 'gemini');
+      expect(system).toContain(GEMINI_TAG_RULE);
+      expect(system).toContain('[chuckles]');
+      expect(system).not.toContain('[轻笑]');
+      expect(system).not.toContain('（轻声）');
+    }
+  });
+
+  it('gemini director 0：外形仍是「(英文风格)原文」，逐字校验那条也在', () => {
+    const system = judgeSystemFor(0, '', 'gemini');
+    expect(system).toContain('(wistful)原文');
+    expect(system).toContain('一个字都不能增删改');
+    expect(system).not.toBe(JUDGE_SYSTEM);
+  });
+
+  it('gemini director 1：公共规则换成英文版，唱歌与风格要求照旧', () => {
+    const system = judgeSystemFor(1, '温柔', 'gemini');
+    expect(system).toContain(GEMINI_JUDGE_DIRECTOR_COMMON);
+    expect(system).toContain(JUDGE_DIRECTOR_TAGS_RULE);
+    expect(system).toContain('(singing)');
+    expect(system).toContain('【风格要求】温柔');
+  });
+
+  it('不传方言 / 传 mimo 时与改动前逐字相同', () => {
+    for (const director of [0, 1, 2]) {
+      expect(judgeSystemFor(director, '平静')).toBe(judgeSystemFor(director, '平静', 'mimo'));
+      expect(judgeSystemFor(director, '平静')).toBe(judgeSystemFor(director, '平静', 'openai'));
+    }
+  });
+});
+
+describe('composeVoiceSpeech 把方言交给 judge', () => {
+  it('dialect=gemini 时 system 用英文标签版，正文与解析照旧', async () => {
+    const line = '(wistful)这么多年过去了，[sigh]我还记得。';
+    const { calls, fetchImpl } = recorder(() => judgeResponse(line));
+    const speech = await composeVoiceSpeech({
+      text: ORIGINAL,
+      prompt: '',
+      judge: JUDGE,
+      fetchImpl,
+      director: 1,
+      dialect: 'gemini',
+    });
+    expect(bodyOf(calls[0] as Recorded)['messages']).toEqual([
+      { role: 'system', content: judgeSystemFor(1, '', 'gemini') },
+      { role: 'user', content: ORIGINAL },
+    ]);
+    // 导演模式：风格组留在正文里只出现一次，styleLabel 单独留给日志
+    expect(speech).toEqual({ tag: '', text: line, styleLabel: '(wistful)' });
   });
 });
 

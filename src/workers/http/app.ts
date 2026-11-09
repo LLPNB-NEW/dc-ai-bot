@@ -2058,6 +2058,7 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
         prompt,
         judge,
         director,
+        dialect: effective.dialect,
         onJudgeLine: (line: string): void => {
           judgeLine = line;
         },

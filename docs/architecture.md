@@ -5438,3 +5438,33 @@ export interface ToolCallDelta {
 - `test/voice.speech-text.test.ts` 9 例：弯引号、直角引号、嵌套的 `『』`、多段拼接、无引号兜底、空引号回退、英文直引号不认、清理与截断后缀、纯空白回空串。
 - 只影响「念什么」，不影响「念不念」：`[[voice]]` 判定与 `voice_settings.mode` 三道门都在 `maybeSendVoice()` 里，顺序未变。
 - 取出的台词为空的引号对（`“”`）视为没有台词；全是空引号时回退整段，而不是回空串。
+
+## 74. Gemini 只认英文标签（gemini-tags-1，2026-11-09）
+
+### 74.1 缺的是什么
+
+judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正文里 `[轻笑]`、`[叹气]` 这类中文音频标签。切到 gemini 方言后，`createGeminiTts` 只忽略那个前缀 tag，导演模式（1 / 2）写进正文的中文标签仍然原样进了 `input`。
+
+### 74.2 实测（relay 探针，2026-11-09，voice=Kore）
+
+| 送进去 | 时长 | RMS |
+| :--- | :--- | :--- |
+| `你好呀，我是苏映雪。今天想听你讲那只猫的故事。` | 5.56 s | 6907 |
+| `…[轻笑轻笑]…` | 8.28 s | 4524 |
+| `…[轻笑轻笑轻笑轻笑]…` | 8.64 s | 4753 |
+| `…[whispers]…` | 6.04 s | 5066 |
+| `(whispering) 你好呀…` | 7.04 s | **1858** |
+
+结论：中文标签被念出来（时长随标签字数增长），英文方括号标签与英文括号风格组改变发音而不占时长（`(whispering)` 把 RMS 压到 1/3.7）。
+
+### 74.3 决定
+
+- `judgeSystemFor(director, prompt, dialect)` 加第三参：`dialect === 'gemini'` 时换成 `GEMINI_JUDGE_SYSTEM` / `GEMINI_JUDGE_DIRECTOR_COMMON`，外形与 MiMo 一致（`(英文风格)正文` + 正文里插 `[英文标签]`），只把示例与 `GEMINI_TAG_RULE` 换成英文词表：`[chuckles]` `[laughs]` `[sigh]` `[whispers]` `[gasp]` `[faster]` `[slow]` `[sarcasm]`。
+- 方言从三条路传进来：网关（`repos.ttsSettings.get()` 的 `dialect`）、斜杠命令（同源）、后台试听（`effective.dialect`）。`composeVoiceSpeech` 只是透传，解析与护栏一个字没改。
+- 不传方言（缺省）与 `mimo` / `openai` 逐字相同：老指令原样保留，MiMo 的中文标签照旧。
+
+### 74.4 边界
+
+- 中文标签在 gemini 上仍会被念：这条只在 judge 听话时成立，所以 `GEMINI_TAG_RULE` 用「会被原样念出来」当理由，而不是「请遵守格式」。
+- `voice_settings.director = 0` 时 gemini 拿不到任何风格：前缀 tag 被 `createGeminiTts` 显式忽略，风格只走导演模式。
+- openai 方言同病（`createOpenAiTts` 也忽略 tag，导演模式的中文标签会被念）；这次没改，因为线上没人用它。

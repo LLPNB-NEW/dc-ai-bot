@@ -55,6 +55,7 @@ import type {
   ReactionRequest,
   ReactionTarget,
   ReplyRef,
+  TtsDialect,
   TurnContext,
   TurnResult,
 } from '../../core/types';
@@ -129,7 +130,7 @@ export const GATEWAY_STATUS_PATH = '/status';
 export const GATEWAY_SHUTDOWN_PATH = '/shutdown';
 
 /** 引擎版本标记：DO 在每次 alarm 打一次、Node 宿主启动时打一次，用来确认线上跑的是哪一版 */
-export const GATEWAY_BUILD = 'voice-quotes-1';
+export const GATEWAY_BUILD = 'gemini-tags-1';
 
 /** 握手看门狗：连上了却一直没等到 HELLO 时，靠这次 alarm 把宿主再唤醒一次 */
 const HANDSHAKE_WATCHDOG_MS = 15000;
@@ -714,9 +715,12 @@ class GatewayEngineCore {
       let tts: TtsPort = createUnconfiguredTts();
       // 判断语气的模型：judge 三字段都非空才算配好，否则这条语音只走固定提示词
       let judge: TtsStyleJudgeConfig | null = null;
+      // 方言同样现读：gemini 要用英文标签指令，否则 judge 写的中文标签会被念出来
+      let ttsDialect: TtsDialect | undefined;
       try {
         const storedTts = await repos.ttsSettings.get();
         if (storedTts !== null) {
+          ttsDialect = storedTts.dialect;
           const ttsConfig = ttsConfigFrom(storedTts);
           if (ttsConfig !== null) tts = createTts(ttsConfig);
           const candidate = { url: storedTts.judgeUrl, key: storedTts.judgeKey, model: storedTts.judgeModel };
@@ -825,6 +829,7 @@ class GatewayEngineCore {
           text,
           wanted: voiceRequested,
           judge,
+          ...(ttsDialect === undefined ? {} : { dialect: ttsDialect }),
           stylePrompt,
           send: async (audio: Uint8Array): Promise<void> => {
             // 附件形状由端口声明：gemini 是 WAV、其余是 mp3，发送层不该自己猜

@@ -16,6 +16,7 @@ import type {
   Scope,
   ScopedKey,
   SummaryOutcome,
+  TtsDialect,
   TurnContext,
   VoiceSettingsConfig,
 } from '../../core/types';
@@ -375,10 +376,12 @@ async function sendVoiceReply(
 
   // judge 每次现读：后台改完下一条命令就生效。读失败当作没配（只 warn），语音照发。
   let judge: TtsStyleJudgeConfig | null = null;
+  let dialect: TtsDialect | undefined;
   const ttsSettings = runtime.deps.ttsSettings;
   if (ttsSettings !== undefined) {
     try {
       const stored = await ttsSettings.get();
+      dialect = stored?.dialect;
       const candidate = {
         url: stored?.judgeUrl ?? '',
         key: stored?.judgeKey ?? '',
@@ -412,6 +415,7 @@ async function sendVoiceReply(
     text,
     wanted,
     judge,
+    ...(dialect === undefined ? {} : { dialect }),
     stylePrompt,
     send: (audio: Uint8Array): Promise<void> => sendChannelFile(options, channelId, audio),
     log: (line: string): void => runtime.log(line),

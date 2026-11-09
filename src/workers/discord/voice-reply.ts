@@ -1,4 +1,4 @@
-import type { VoiceSettingsConfig } from '../../core/types';
+import type { TtsDialect, VoiceSettingsConfig } from '../../core/types';
 import { toSpeechText } from '../../core/voice/speech-text';
 import { VOICE_MODE_OFF, VOICE_MODE_ON_REQUEST } from '../../core/voice/settings';
 import { composeVoiceSpeech } from '../../core/voice/style';
@@ -21,6 +21,8 @@ export interface VoiceReplyInput {
   stylePrompt?: () => Promise<string>;
   /** 判断情绪用的模型；null / 缺省 = 不判断，直接拿 stylePrompt 当语气 */
   judge?: TtsStyleJudgeConfig | null;
+  /** 合成方言：gemini 时 judge 只写英文标签（中文标签会被它当正文念出来） */
+  dialect?: TtsDialect;
   /** 日志出口；默认 console.warn，测试可注入静默实现 */
   log?: (message: string) => void;
   /**
@@ -71,6 +73,7 @@ export async function maybeSendVoice(input: VoiceReplyInput): Promise<{ sent: bo
       judge: input.judge ?? null,
       // 导演模式读三层合并后的配置：0 = 逐字朗读，1 = 只许插标签，2 = 允许改写
       director: settings.director,
+      ...(input.dialect === undefined ? {} : { dialect: input.dialect }),
       onJudgeLine: (line: string): void => {
         judgeLine = line;
       },

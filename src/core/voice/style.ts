@@ -1,4 +1,4 @@
-import type { TtsStyleLayer } from '../types';
+import type { TtsDialect, TtsStyleLayer } from '../types';
 import { judgeTimeoutMs } from '../timeouts';
 import { isVoiceDirector, VOICE_DIRECTOR_FREE, VOICE_DIRECTOR_OFF, VOICE_DIRECTOR_TAGS } from './settings';
 
@@ -58,6 +58,33 @@ export const JUDGE_DIRECTOR_COMMON =
   '唱歌时整体风格组里要有一个 (唱歌)，并且整段歌词只在这一个地方标一次，不要给每句歌词加标签，歌词用中文。' +
   '风格按这一条内容自己挑，后台给的【风格要求】只当偏好，与内容冲突时以内容为准。';
 
+/**
+ * Gemini 的标签形状：与 MiMo 同一个「(风格)正文」外形，但只认英文单词。
+ * 实测（2026-11-09，relay 探针）：中文标签会被逐字念出来 —— [轻笑] 让同一句从 2.2 秒变 2.8 秒、
+ * [轻笑啊呀这是] 变 5.6 秒；英文的 [whispers] 与 (whispering) 则明显改变发音而不占时长。
+ * 所以给 gemini 方言单独一份指令：外形不变，所有标签换成英文。
+ */
+export const GEMINI_TAG_RULE =
+  '所有标签都必须用英文小写单词：开头的风格组如 (wistful soft)、(cheerful)、(nervous)，' +
+  '正文里的音频标签如 [chuckles]、[laughs]、[sigh]、[whispers]、[gasp]、[faster]、[slow]、[sarcasm]；' +
+  '写中文标签会被原样念出来，一个字都不要翻译成中文。';
+
+/** Gemini 版的逐字指令：外形与 JUDGE_SYSTEM 相同，只把示例换成英文标签 */
+export const GEMINI_JUDGE_SYSTEM =
+  '读下面这句话，只输出一行，形如「(wistful)原文」：开头是半角括号包住的英文语气组（可以多个词用空格分隔，不超过 20 字），' +
+  '后面紧跟原文。原文必须与输入逐字相同；需要时只能在原文里插入英文音频标签（如 [chuckles]、[sigh]、[faster]），' +
+  '一个字都不能增删改。不要解释、不要引号、不要换行。' +
+  GEMINI_TAG_RULE;
+
+/** Gemini 版的导演通用规则：中文标签会被念出来，这里只教英文标签 */
+export const GEMINI_JUDGE_DIRECTOR_COMMON =
+  '开头 (风格1 风格2) 是整体风格；紧跟其后的正文每一句前面都要加一个括号标签写语气或说话方式' +
+  '（如 (soft)、(faster)、(teasing)），' +
+  '正文任意位置还可以插 [音频标签] 做细粒度控制，括号可以用半角 ()、全角（）或 []；' +
+  GEMINI_TAG_RULE +
+  '唱歌时整体风格组里要有一个 (singing)，并且整段歌词只在这一个地方标一次，不要给每句歌词加标签，歌词保持中文。' +
+  '风格按这一条内容自己挑，后台给的【风格要求】只当偏好，与内容冲突时以内容为准。';
+
 /** director = 1 追加的规则：正文一个字都不许改，只许插标签 */
 export const JUDGE_DIRECTOR_TAGS_RULE =
   '不许改一个字，只能插标签：正文必须与输入逐字相同，只允许新增或保留括号组与方括号组。';
@@ -73,13 +100,15 @@ const JUDGE_DIRECTOR_SHAPE = '只输出这一行：不要解释、不要引号�
  * 按导演档位拼系统指令：0 档沿用逐字朗读的旧指令（一个字都不变），
  * 1 / 2 档换成「开头风格组 + 正文可插标签」的新指令，有风格要求就附在最后。
  */
-export function judgeSystemFor(director: number, prompt: string): string {
+export function judgeSystemFor(director: number, prompt: string, dialect?: TtsDialect): string {
   const withPrompt = (base: string): string =>
     prompt === '' ? base : base + '\n【风格要求】' + prompt;
+  // gemini 只认英文标签：中文标签会被它当正文念出来，所以整套指令换成英文示例
+  const gemini = dialect === 'gemini';
   if (director === VOICE_DIRECTOR_TAGS) {
     return withPrompt(
       '读下面这段内容，把它念出来：只输出一行，开头是整体风格组，正文照原文不许改字，只许插标签。' +
-        JUDGE_DIRECTOR_COMMON +
+        (gemini ? GEMINI_JUDGE_DIRECTOR_COMMON : JUDGE_DIRECTOR_COMMON) +
         JUDGE_DIRECTOR_TAGS_RULE +
         JUDGE_DIRECTOR_SHAPE,
     );
@@ -87,12 +116,12 @@ export function judgeSystemFor(director: number, prompt: string): string {
   if (director === VOICE_DIRECTOR_FREE) {
     return withPrompt(
       '读下面这段内容，把它念出来：只输出一行，开头是整体风格组，正文按内容口语化改写。' +
-        JUDGE_DIRECTOR_COMMON +
+        (gemini ? GEMINI_JUDGE_DIRECTOR_COMMON : JUDGE_DIRECTOR_COMMON) +
         JUDGE_DIRECTOR_FREE_RULE +
         JUDGE_DIRECTOR_SHAPE,
     );
   }
-  return withPrompt(JUDGE_SYSTEM);
+  return withPrompt(gemini ? GEMINI_JUDGE_SYSTEM : JUDGE_SYSTEM);
 }
 
 /** 三层语气提示词：channel / guild / global 各自可空 */
@@ -360,6 +389,11 @@ export interface VoiceSpeechInput {
    * 缺省（含后台试听这类不传的老调用点）按 0 处理，行为与改动前逐字一致。
    */
   director?: number;
+  /**
+   * 合成方言：决定 judge 用哪套标签示例。gemini 只认英文标签（中文会被念出来），
+   * 缺省按 mimo 处理，行为与加这个字段之前逐字相同。
+   */
+  dialect?: TtsDialect;
   fetchImpl?: typeof fetch;
   /**
    * 诊断出口：judge 真的回了一行时，把整行交出去（成功日志写 judge=…，试听原样回显）。
@@ -390,7 +424,7 @@ export async function composeVoiceSpeech(input: VoiceSpeechInput): Promise<Voice
     if (!isJudgeConfigured(judge)) return judgeFailed();
 
     // 有风格要求就拼在系统指令后面：同一段 system 里既说「写一行」也说「照这个风格」
-    const system = judgeSystemFor(director, prompt);
+    const system = judgeSystemFor(director, prompt, input.dialect);
     const body = {
       model: judge.model.trim(),
       messages: [
