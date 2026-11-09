@@ -5457,6 +5457,8 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 结论：中文标签被念出来（时长随标签字数增长），英文方括号标签与英文括号风格组改变发音而不占时长（`(whispering)` 把 RMS 压到 1/3.7）。
 
+第二组探针（同句 3.52 s 为基线）：`(wistful)` 3.88 s、无意义的 `(zzqq)` 3.96 s、`(gentle cute)` 4.48 s。无意义标签与真标签只差一个括号停顿 —— 说明英文括号组没有被念出来，只是留了一个短停顿；中文标签的 +3.4 s 量级则只有「逐字念」解释得通。
+
 ### 74.3 决定
 
 - `judgeSystemFor(director, prompt, dialect)` 加第三参：`dialect === 'gemini'` 时换成 `GEMINI_JUDGE_SYSTEM` / `GEMINI_JUDGE_DIRECTOR_COMMON`，外形与 MiMo 一致（`(英文风格)正文` + 正文里插 `[英文标签]`），只把示例与 `GEMINI_TAG_RULE` 换成英文词表：`[chuckles]` `[laughs]` `[sigh]` `[whispers]` `[gasp]` `[faster]` `[slow]` `[sarcasm]`。
