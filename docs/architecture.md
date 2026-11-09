@@ -5322,3 +5322,48 @@ export interface ToolCallDelta {
 - 工具说明：`drawTool().function.description` 改成「画一张图并直接发到频道……图画好之后会再让你写这一轮的正文。」，与第二段请求对上。
 - 测试：`test/chat.service.test.ts` 新增「图画好之后正文由主模型再写一次」一例（第一段只调 draw_image、第二段交 story_reply；断言两段请求、第二段只带 `story_reply`、末尾消息带「已经发给用户了」、历史存正文）；「反复只调 draw_image」那一例仍覆盖纯图兜底。`test/chat.image-tool.test.ts` 的 `required` 断言回到 `['prompt']`。
 - 门牌：`GATEWAY_BUILD = 'draw-image-4'`（`src/workers/gateway/engine.ts:132`，`test/gateway.node.test.ts:229` 同步）。
+
+## 70. 超时全部搬进后台，外加第三种 TTS 方言（timeout-config-1，2026-11-09）
+
+### 70.1 缺的是什么
+
+到 `draw-image-4` 为止，时间预算全写死在代码里：LLM 180 秒（`src/core/providers/rt.ts`）、生图 180 秒（`src/core/chat/image-tool.ts`）、TTS 30 秒（`src/core/voice/tts.ts`）、语气评审 15 秒起步 + 每字 40 毫秒、封顶 45 秒（`src/core/voice/style.ts`）、拉中继报错 5 秒（`src/core/pg-errors.ts`）、优雅退出 25 秒（`src/node/main.ts`）。接 Gemini TTS 时这条更明显：204 字中文要 10.9 秒才回、音频本身 43.8 秒，30 秒的旧上限会把正常请求掐死，而「到底给多少」取决于模型、频道与机器，写死在代码里只能每次改代码重发镜像。
+
+### 70.2 决定
+
+- **后台是主入口，`.env` 只是兜底**：每一项都可以在后台改；库里没存过这一项时，用环境变量，再用内置默认。
+- **逐项 + 一个全局倍率**：九个毫秒值各自可改，另有一个 0.1–10 的倍率一次放大缩小（单项最终还会被夹在自己的上下限里）。
+- **保存即生效**：调用点一律现取（`resolveTimeout(key)`），保存后下一条请求就用新值，不必重启。
+
+### 70.3 数据与代码地图
+
+- 迁移 `migrations/0033_timeout_settings.sql`：一张平表 `timeout_settings(name TEXT PRIMARY KEY, value REAL NOT NULL, updated_at TEXT NOT NULL)`。只建表、只做加法。
+- `src/core/timeouts.ts`：`TIMEOUT_KEYS` 九项 `llm / image / tts / ttsGemini / judgeFloor / judgePerChar / judgeCap / pgErrors / shutdown`；`TIMEOUT_FIELDS` 带 env 名、中文说明、默认值与上下限；`MULTIPLIER_ENV = 'TIMEOUT_MULTIPLIER'`、`MULTIPLIER_MIN = 0.1`、`MULTIPLIER_MAX = 10`。导出 `timeoutDefaults()`（env + 内置默认）、`timeoutSettings()`（当前基线）、`applyTimeoutOverrides()`、`resetTimeouts()`、`resolveTimeout(key)`（基线 × 倍率，再夹进上下限）、`judgeTimeoutMs(chars)`（起步 + 每字 × 字数，封顶）。env 用 `globalThis.process?.env` 读，workerd 下不会炸。
+- 接线（全部改成现取）：`src/core/providers/rt.ts` 的 `createRequestSignal()` → `resolveTimeout('llm')`；`src/core/chat/image-tool.ts` → `resolveTimeout('image')`；`src/core/voice/tts.ts` 三处 → `resolveTimeout('tts')` 与 `resolveTimeout('ttsGemini')`；`src/core/voice/style.ts` 的 `judgeTimeoutMs` 改成从 core 导入；`src/core/pg-errors.ts` → `resolveTimeout('pgErrors')`；`src/node/main.ts` 退出预算 → `resolveTimeout('shutdown')`。
+- 装配：`src/node/main.ts` 启动时 `await handlers.loadTimeoutSettings()`（读库 → `applyTimeoutOverrides`，失败只 warn）；`src/workers/index.ts` 每个请求前 `loadTimeoutSettings(data)`，多 isolate 下最多晚一条请求。
+- 仓储：`src/core/ports.ts` 新增 `TimeoutSettingsStore { get(); put(); clear(); }`；`src/workers/db/d1-repository.ts` 的 `timeoutSettings` 用 `db.batch` 先 DELETE 再逐条 INSERT，`clear()` 只 DELETE。
+- HTTP：`GET /api/timeouts` 回 `{ fields: [{ key, env, label, detail, defaultMs, minMs, maxMs, valueMs, effectiveMs, overridden }], multiplier }`，并顺手把库里的值重新装进进程；`PUT` 要求九项 + multiplier 整份给（少一项、非数字、越界都是 `400 BAD_TIMEOUT_SETTINGS`），只落库「和基线不同」的项（改回默认就删行，`.env` 变了还能重新露出来）；`DELETE` 清表 + `resetTimeouts()`。
+- 前端：`web/src/pages/TimeoutsPage.tsx`（输入框存字符串，避免输入中途被 `Number()` 吃掉光标）+ `web/src/App.tsx` 的「超时」tab；`web/src/api.ts` 新增 `fetchTimeouts / saveTimeouts / resetTimeouts / describeTimeoutRejection` 与三个视图类型。
+
+### 70.4 第三种 TTS 方言（同一版一起上线）
+
+- `TtsDialect` 变成 `'openai' | 'mimo' | 'gemini'`；`DEFAULT_MODEL` 里 gemini 是 `gemini-3.8-flash-tts`；`createGeminiTts` 打 `POST {url}/audio/speech`，body `{ model, input, response_format: 'wav', voice? }`。
+- 产物是 24kHz 单声道 WAV，所以 `TtsPort` 多了一条可选 `file: { name, contentType }`（`voice.wav` / `audio/wav` vs `voice.mp3` / `audio/mpeg`），`src/workers/gateway/engine.ts:830` 发附件时把 `tts.file` 传给 `sendFile`，后台试听的 `contentType` 也跟着端口走。
+- 迁移 `migrations/0032_tts_gemini_dialect.sql`：SQLite 改不了 CHECK，只能重建表（12 列原样搬过去，`CHECK (dialect IN ('openai','mimo','gemini'))`）。
+- 中继侧见 `docs/hosting.md` §15.5「语音合成：POST /v1/audio/speech 出 24kHz WAV」：音色在 `generation_config[15]`，上游回 `audio/l16` 分片，中继拼 PCM 再套 WAV 头；中继的超时也全部改成 `.env` 读（`TTS_TIMEOUT_MS` / `URL_READ_TIMEOUT_MS` / `KEEPALIVE_TIMEOUT_MS` / `HEADERS_TIMEOUT_MS`），临时诊断口 `POST /v1/_probe` 已删。
+
+### 70.5 测试与门槛
+
+- `test/timeouts.test.ts` 7 例：默认值、env 覆盖与夹紧、后台覆盖 + 倍率、倍率与单项夹紧、保存即生效与 reset、`judgeTimeoutMs` 公式、倍率作用于评审三档。
+- `test/admin.timeouts.test.ts` 7 例：空库形状、未登录 401、只落库与基线不同的项（`llm=240000` + 倍率 2 → 生效 480000，`pgErrors` 5000 → 10000）、越界 400、少项/非数字/空体 400、改回基线删行、DELETE 清空并回默认。
+- `test/tts.gemini.test.ts` 10 例：方言解析、默认模型、请求形状、无 voice 不发 voice、超时 120 秒、文件形状、非 2xx 与请求失败的归一。
+- `test/node.migrate.test.ts`：迁移清单加到 33 个，并新增「0032 重建表后老行十二列原样保留」一例。
+- 门槛：`typecheck` 0、`typecheck:web` 0、`npm test` 91 文件 1666 例全过、`test:node` 119 passed + 1 skipped。
+- 门牌：`GATEWAY_BUILD = 'timeout-config-1'`（`src/workers/gateway/engine.ts:132`，`test/gateway.node.test.ts:229` 同步）。
+
+### 70.6 边界
+
+- 只覆盖「一次请求等多久」这一层；重试次数（LLM 两次尝试）、退避间隔、并发上限不在这一页。
+- 中继是独立进程，它的超时只认 `.env`（改完要 `docker compose up -d --build`），后台改不到。
+- `.env` 优先级低于后台：库里存过的项永远盖住 env，想回到 env 就在页面上「恢复默认」。
+- workerd 多 isolate 下，后台保存只对当前 isolate 立即生效，其它 isolate 在下一次请求前重读（最多晚一条请求）。

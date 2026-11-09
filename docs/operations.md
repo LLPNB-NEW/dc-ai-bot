@@ -2451,3 +2451,14 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 9. **失败怎么分辨**：`图片生成失败 key=ds IMAGE_HTTP 404:` = 那把 Key 的 baseUrl 没有生图端点；`upstream_http_error 上游 HTTP 502` = 上游瞬时抖动，重发一次；`IMAGE_MISSING` = 上游 2xx 但响应里没有图；`IMAGE_BAD_JSON` = 响应不是 JSON（多半是网关错误页）。
 10. **事务指纹**：日志里出现 `cannot start a transaction within a transaction` 或「图都生成了却整轮 `ALL_PROVIDERS_FAILED`、`messages` 一行不落」，先查是不是又有人绕过 `batch()` 的排队并发写——§69.5 就是这一条。
 11. **回退**：镜像回退到 `draw-image-3` 即回到「台词由 `say` 参数给」（预设第 37 段也要换回带 `say` 的文案）；`draw-image-2` 是只发图；`reaction-effort-1` 是「模型不会画图」；没有新迁移（总数仍是 31），中继的生图端点留着不影响不带该工具的请求。
+
+## 49. timeout-config-1 的判据：后台改的超时真的生效，Gemini 语音真的出 WAV
+
+1. **先看门牌**：容器启动回执应是 `[gateway] node host started build=timeout-config-1` 与 `[node] listening on :8787 … build=timeout-config-1`；还是 `draw-image-4` 说明镜像没换。
+2. **迁移到位**：这一版多出 `0033_timeout_settings.sql`，日志 `迁移检查完成 applied=1 skipped=32` 只在第一次出现；`sudo sqlite3 /opt/dc-ai-bot/data/dc-ai-bot.sqlite3 "select name, value from timeout_settings"` 空表 = 还没在后台改过任何一项。
+3. **页面读得到**：后台「超时」页打开就是九行 + 一张「全局倍率」卡片；此时每行都显示「（默认）」、`overridden=false`、生效值等于默认值，倍率 1。
+4. **保存立刻生效**：把「中继报错查询」改成 2000 保存 → 页面回显生效 2 秒、该行变成「已被后台覆盖」；`select * from timeout_settings` 里应只有 `pgErrors` 一行（改回默认这一行会消失）。再把倍率改成 2 → 每一行的生效值翻倍，而库里的值不变（倍率存在同一个键 `multiplier` 下）。
+5. **真的按新值计时**：把「语音合成」改成 5000 保存，再让机器人发一条长语音——bot 日志应是 TTS 超时失败，而不是照旧等 30 秒；把它改回 30000 或「恢复默认」，下一条语音恢复正常。
+6. **Gemini 方言出 WAV**：后台「语音」页方言选「Gemini（/audio/speech，WAV）」，地址填 `https://<域名>/pg/v1`、Key 填中继 Key、音色 `Kore`，保存后点试听——返回的 `contentType` 应是 `audio/wav`（openai 方言仍是 `audio/mpeg`）。主频道发一句触发语音：Discord 附件文件名 `voice.wav`、`content_type: audio/wav`；中继日志 `语音合成 model=gemini-3.8-flash-tts voice=Kore chars=… pcm=… chunks=… format=wav ms=…`。
+7. **坏输入只回 400**：未登录 GET/PUT/DELETE 都是 401；少一项、给字符串、超出该项上下限、倍率超过 10，全部 `400 BAD_TIMEOUT_SETTINGS`，页面显示「超时值不合法…」而不是把码甩出来。
+8. **回退**：页面上「恢复默认」或 `DELETE /api/timeouts` 清表即回到 `.env` 与内置默认；镜像回退到 `draw-image-4` 时，0033 只是多一张空表，旧代码不读它。注意 0032 重建过 `tts_settings`（CHECK 加了 gemini），回退镜像前先确认表里没有 `dialect='gemini'` 的行，否则旧代码读侧会把它当 openai。
