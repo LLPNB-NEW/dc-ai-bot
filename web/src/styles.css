@@ -360,6 +360,62 @@ fieldset.fallbacks legend {
   flex: none;
 }
 
+.page.timeouts {
+  display: flex;
+  flex-direction: column;
+}
+
+.page.timeouts .card {
+  width: 100%;
+  max-width: 1040px;
+}
+
+.page.timeouts .timeouts-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.page.timeouts table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.page.timeouts th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  white-space: nowrap;
+}
+
+.page.timeouts td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.page.timeouts tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.page.timeouts td input {
+  width: 130px;
+}
+
+.page.timeouts .field input {
+  max-width: 220px;
+}
+
+.page.timeouts td:nth-child(3),
+.page.timeouts td:nth-child(4) {
+  white-space: nowrap;
+}
+
 .page.logs {
   grid-template-columns: minmax(0, 1fr);
 }

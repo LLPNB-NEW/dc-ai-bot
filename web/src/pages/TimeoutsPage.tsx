@@ -138,7 +138,7 @@ export default function TimeoutsPage() {
   const overriddenCount = payload?.fields.filter((field) => field.overridden).length ?? 0;
 
   return (
-    <section className="page">
+    <section className="page timeouts">
       <header className="page-head">
         <h2>超时</h2>
         <p className="hint">
@@ -171,7 +171,8 @@ export default function TimeoutsPage() {
 
           <div className="card">
             <h3>逐项</h3>
-            <table className="table">
+            <div className="timeouts-table-wrap">
+              <table>
               <thead>
                 <tr>
                   <th>项目</th>
@@ -205,8 +206,9 @@ export default function TimeoutsPage() {
                     </td>
                   </tr>
                 ))}
-              </tbody>
-            </table>
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="row">
