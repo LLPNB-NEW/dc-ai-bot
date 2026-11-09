@@ -95,13 +95,33 @@ const CONTEXT_ROW = {
   updatedAt: '2026-10-25T03:00:00.000Z',
 };
 
-function makeHarness(contextTool = false): { deps: ChatServiceDeps; requests: LlmRequest[] } {
+/** 预设只有一段时，它就是描述体/legacy system 里的第一段正文 */
+function presetOf(content: string) {
+  return {
+    segments: [
+      {
+        id: 's1',
+        name: '人设',
+        role: 'system' as const,
+        content,
+        enabled: true,
+        placement: 'before' as const,
+        position: 0,
+      },
+    ],
+  };
+}
+
+function makeHarness(
+  contextTool = false,
+  presetText?: string,
+): { deps: ChatServiceDeps; requests: LlmRequest[] } {
   const requests: LlmRequest[] = [];
   const state: ChatMessage[] = [];
   const deps: ChatServiceDeps = {
     prompts: {
       async get() {
-        return null;
+        return presetText === undefined ? null : presetOf(presetText);
       },
       async list() {
         return [];
@@ -181,8 +201,8 @@ function makeHarness(contextTool = false): { deps: ChatServiceDeps; requests: Ll
   return { deps, requests };
 }
 
-async function systemFor(ctx: TurnContext, contextTool = false): Promise<string> {
-  const harness = makeHarness(contextTool);
+async function systemFor(ctx: TurnContext, contextTool = false, presetText?: string): Promise<string> {
+  const harness = makeHarness(contextTool, presetText);
   const service = createChatService(harness.deps);
   await service.run(ctx);
   expect(harness.requests).toHaveLength(1);
@@ -244,5 +264,27 @@ describe('voiceHint 决定 system 里有没有【语音】段', () => {
 
     expect(system.indexOf('【语音】')).toBeGreaterThan(system.indexOf('【表情】'));
     expect(system.indexOf('【可用自定义表情】')).toBeGreaterThan(system.indexOf('【语音】'));
+  });
+});
+
+describe('预设优先：预设里写过 [[voice]] 就不再追加代码那段', () => {
+  it('上下文模式下预设已提到 → system 回到固定那份，不重复', async () => {
+    const system = await systemFor({ ...CTX, voiceHint: true }, true, '想说话就单独写一行 [[voice]]。');
+
+    expect(system).toBe(CONTEXT_TOOL_SYSTEM);
+  });
+
+  it('普通模式下预设已提到 → 不追加【语音】段，预设正文照旧在', async () => {
+    const preset = '想说话就单独写一行 [[voice]]。';
+    const system = await systemFor({ ...CTX, voiceHint: true }, false, preset);
+
+    expect(system).toContain(preset);
+    expect(system).not.toContain('【语音】');
+  });
+
+  it('预设提到但模式没开：也照样不加（提示归预设管）', async () => {
+    const system = await systemFor(CTX, true, '要念就写 [[voice]]');
+
+    expect(system).toBe(CONTEXT_TOOL_SYSTEM);
   });
 });

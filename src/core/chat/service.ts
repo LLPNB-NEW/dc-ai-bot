@@ -105,6 +105,7 @@ import {
   replyOnlyTools,
   taggedHistory,
 } from './context-tool';
+import { VOICE_DIRECTIVE } from '../voice/directive';
 import { dropRefusalHistory } from './refusal-filter';
 import { replyToolsFor } from './reply-tool';
 import { IMAGE_MODEL_NAME, drawPromptOf, drawToolsFor, requestImage } from './image-tool';
@@ -1267,8 +1268,10 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
     // 预设段又回到天头（§52）：它自己不带前导空行，用两个换行和后面的平台元信息分开
     const presetHead = promptParts.before === '' ? '' : promptParts.before + '\n\n';
     const presetAfter = promptParts.after === '' ? '' : '\n\n' + promptParts.after;
-    // 语音提示段先算一次：两套 system 都要用它（§55 的上下文 system 没有别的段落可挂）
-    const voiceHint = renderVoiceHint(ctx.voiceHint);
+    // 语音提示段先算一次：两套 system 都要用它（§55 的上下文 system 没有别的段落可挂）。
+    // 预设自己写了 [[voice]] 就不再追加：文案由预设主，代码只负责没人写时的兜底。
+    const presetMentionsVoice = (promptParts.before + '\n' + promptParts.after).includes(VOICE_DIRECTIVE);
+    const voiceHint = presetMentionsVoice ? '' : renderVoiceHint(ctx.voiceHint);
     // 身份块自带两个前导换行（当年当天头时的分隔约定）；只有预设为空、它真出现在天头时才需要削掉
     const legacySystem =
       presetHead +

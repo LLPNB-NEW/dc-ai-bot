@@ -2463,12 +2463,13 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 7. **坏输入只回 400**：未登录 GET/PUT/DELETE 都是 401；少一项、给字符串、超出该项上下限、倍率超过 10，全部 `400 BAD_TIMEOUT_SETTINGS`，页面显示「超时值不合法…」而不是把码甩出来。
 8. **回退**：页面上「恢复默认」或 `DELETE /api/timeouts` 清表即回到 `.env` 与内置默认；镜像回退到 `draw-image-4` 时，0033 只是多一张空表，旧代码不读它。注意 0032 重建过 `tts_settings`（CHECK 加了 gemini），回退镜像前先确认表里没有 `dialect='gemini'` 的行，否则旧代码读侧会把它当 openai。
 
-## 50. voice-hint-context-1 的判据：context 模式下「按指令」真的发出语音
+## 50. voice-hint-preset-1 的判据：context 模式下「按指令」真的发出语音
 
-1. **先看门牌**：容器启动回执应是 `[gateway] node host started build=voice-hint-context-1`；还是 `timeout-config-1` 说明镜像没换。
+1. **先看门牌**：容器启动回执应是 `[gateway] node host started build=voice-hint-preset-1`；还是 `timeout-config-1` 说明镜像没换。
 2. **前置状态**：`voice_settings` 至少一行 `mode=1`（本版线上是 `global / voice=Kore / speed=100 / director=1`），`tts_settings` 是 `dialect=gemini`、`url=https://relay.example.com/pg/v1`。
 3. **发一条要语音的消息**（例如「用语音回我一句」），然后看三处：
    - `runtime_logs` 紧随「回复成功」应有一行 `[voice] 已发送 tag=… bytes=… 字数=… mode=… director=…`（gateway、info）；没有这行说明模型没写 `[[voice]]`（提示段没进 system）或开关不是 1。
    - `/chat` 那行 `turn … systemLen=` 在上下文模式 + 语音提示时为 142（`CONTEXT_TOOL_SYSTEM` 85 + 语音段 57），不带提示时是 85。85 说明 `voiceHint` 没挂上。
    - 中继日志 `语音合成 model=gemini-3.8-flash-tts voice=Kore chars=… pcm=… chunks=… format=wav ms=…`，其字节数应与 Discord 附件 `voice.wav`（`audio/wav`，44 字节 RIFF 头 + PCM）对得上。
 4. **反面判据**：正文里出现 `[[voice]]` 字样 = 剥离没生效；有语音附件但中继没有合成日志 = 附件不是这次合成的。
+5. **预设优先（voice-hint-preset-1 起）**：预设正文里写了 `[[voice]]` 就不再加代码那段，`systemLen` 会回到 85（上下文模式）——这时判「提示到没到」要看描述体里的预设原文，而不是 system 长度；预设没写则仍是 142。

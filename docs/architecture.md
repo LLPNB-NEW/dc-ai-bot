@@ -5368,7 +5368,7 @@ export interface ToolCallDelta {
 - `.env` 优先级低于后台：库里存过的项永远盖住 env，想回到 env 就在页面上「恢复默认」。
 - workerd 多 isolate 下，后台保存只对当前 isolate 立即生效，其它 isolate 在下一次请求前重读（最多晚一条请求）。
 
-## 71. 上下文工具模式下补上【语音】段（voice-hint-context-1，2026-11-09）
+## 71. 上下文工具模式下补上【语音】段（voice-hint-preset-1，2026-11-09）
 
 ### 71.1 缺的是什么
 
@@ -5387,10 +5387,17 @@ export interface ToolCallDelta {
 
 - `test/chat.voice-hint.test.ts` 新增两例：上下文模式 + `voiceHint: true` → `system === CONTEXT_TOOL_SYSTEM + VOICE_HINT`；上下文模式不带提示 → `system === CONTEXT_TOOL_SYSTEM`（逐字）。共 8 例。
 - 门槛：`typecheck` 0、`npm test` 91 文件 1668 例全过、`test:node` 119 passed + 1 skipped。
-- 门牌：`GATEWAY_BUILD = 'voice-hint-context-1'`（`src/workers/gateway/engine.ts:132`，`test/gateway.node.test.ts:229` 同步）。
+- 门牌：`GATEWAY_BUILD = 'voice-hint-preset-1'`（`src/workers/gateway/engine.ts:132`，`test/gateway.node.test.ts:229` 同步）。
 
 ### 71.4 边界
 
 - 只影响「按指令」：`mode = 2`（每条都念）不依赖提示，`mode = 0` 仍然整条跳过。
 - `[[voice]]` 必须单独成行写在正文里；写在 `think_nya` 或 `extra` 参数里不会被念，模型模仿历史行写假时刻的处理也不变。
 - 上下文 system 只有这一句 + 语音段；其它段落（表情、世界书、预设）在上下文模式下依旧不出现，这是 §55 的设计，不是本版遗漏。
+
+### 71.5 预设优先（voice-hint-preset-1）
+
+  `const presetMentionsVoice = (promptParts.before + '\n' + promptParts.after).includes(VOICE_DIRECTIVE);`
+  `const voiceHint = presetMentionsVoice ? '' : renderVoiceHint(ctx.voiceHint);`
+- `VOICE_DIRECTIVE` 来自 `src/core/voice/directive.ts:2`，与 `stripVoiceDirective()` 认的是同一个常量，不会出现「注入用一种写法、剥离认另一种」。
+- 预设没提 `[[voice]]` 时行为与 71.2 逐字相同；提了就完全交给预设，包括 mode 没开也照样不追加（提示归预设管）。
