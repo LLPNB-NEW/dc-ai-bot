@@ -318,6 +318,20 @@ describe('template', () => {
     expect(() => renderTemplate('ok {{ user_name }} {{ bad }}', vars)).toThrow('UNKNOWN_TEMPLATE_VAR: bad');
   });
 
+  it('{{trim}} 是控制宏：保存时不算未知变量，渲染时去掉宏本身并整体去首尾空白', () => {
+    expect(findUnknownVars('{{trim}}小猫之神')).toEqual([]);
+    expect(findUnknownVars('{{trim}}{{oops}}')).toEqual(['oops']);
+    expect(renderTemplate('  {{trim}}小猫之神\n\n', vars)).toBe('小猫之神');
+    expect(renderTemplate('{{trim}}  {{user_name}} ', vars)).toBe('阿天');
+    // 没有这个宏时一个字都不动：段内的换行与缩进是排版，不许顺手 trim
+    expect(renderTemplate('  小猫之神  ', vars)).toBe('  小猫之神  ');
+  });
+
+  it('未实现的宏仍按未知变量拒绝，不静默吞掉', () => {
+    expect(findUnknownVars('{{trim2}}')).toEqual(['trim2']);
+    expect(() => renderTemplate('{{trim2}}', vars)).toThrow('UNKNOWN_TEMPLATE_VAR: trim2');
+  });
+
   it('findUnknownVars 去重且保持出现顺序', () => {
     expect(findUnknownVars('{{zeta}} {{alpha}} {{zeta}} {{user_name}} {{alpha}}')).toEqual(['zeta', 'alpha']);
     expect(findUnknownVars('{{bot_name}} {{user_name}} {{guild_name}} {{channel_name}} {{date}}')).toEqual([]);

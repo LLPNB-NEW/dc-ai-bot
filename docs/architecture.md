@@ -5401,3 +5401,21 @@ export interface ToolCallDelta {
   `const voiceHint = presetMentionsVoice ? '' : renderVoiceHint(ctx.voiceHint);`
 - `VOICE_DIRECTIVE` 来自 `src/core/voice/directive.ts:2`，与 `stripVoiceDirective()` 认的是同一个常量，不会出现「注入用一种写法、剥离认另一种」。
 - 预设没提 `[[voice]]` 时行为与 71.2 逐字相同；提了就完全交给预设，包括 mode 没开也照样不追加（提示归预设管）。
+
+## 72. 酒馆控制宏 {{trim}}（prompt-trim-1，2026-11-09）
+
+### 72.1 缺的是什么
+
+线上那套 48 段预设的第二段开头写着酒馆的 `{{trim}}<|sep|><|merge|>`。`renderTemplate()` 只认 5 个取值变量（`bot_name`/`user_name`/`guild_name`/`channel_name`/`date`），遇到别的名字直接抛 `UNKNOWN_TEMPLATE_VAR`；`PUT /api/prompts` 也在保存前用 `findUnknownVars()` 拦下同名错误。结果：这一层在「提示词」页里改一个字都存不了（`400 UNKNOWN_TEMPLATE_VAR vars:["trim"]`），给频道追加语音段也只能绕过接口直接写库。
+
+### 72.2 决定
+
+- `src/core/prompt/template.ts` 新增 `TEMPLATE_MACROS = ['trim']`：宏不是取值变量，而是对这段文本本身下手，保存时放行（`findUnknownVarsIn` 跳过宏名），渲染时消费。
+- `renderTemplate()` 里 `{{trim}}` 的语义按酒馆来：先把宏本身删掉，渲染完变量后整体去首尾空白。没有这个宏时返回值与改动前逐字相同（段内换行与缩进是排版，不许顺手 trim）。
+- 只列真正实现了的宏：`{{trim2}}` 这类仍按未知变量拒绝，打错字不会被静默吞掉。
+- `<|sep|>`、`<|merge|>` 不是 `{{}}` 形态，本来就不进校验，照原样留在正文里。
+
+### 72.3 边界
+
+- 宏只作用于它所在的那一段，不跨段、不影响 `composeContextBody()` 的空行连接。
+- 频道层能保存之后，页面对这一层的增删改都回到正常路径；本次追加的【语音】段先写库只是因为当时代码还没放行。
