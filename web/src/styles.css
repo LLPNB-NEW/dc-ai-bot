@@ -1641,6 +1641,32 @@ fieldset.fallbacks legend {
   font-size: 12px;
 }
 
+/* 新建入口一行：按钮 + 一句说明，别把两个控件挤成一条 */
+.page.prompts .worldbook-entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 4px 0 8px;
+}
+
+.page.prompts .worldbook-entry-actions .hint {
+  margin: 0;
+}
+
+/* 「操作」列里并排两个行内按钮：编辑 / 删除 */
+.page.prompts .worldbook-op-actions {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* button.link 排在 button.danger 之后会盖掉危险色，这里把它压回来 */
+.page.prompts .worldbook-op-actions button.danger {
+  color: var(--danger);
+}
+
 /* 门牌 prompt-copy-1 语音页：接口卡片在上、语音回复与朗读语气卡片在下；单列才排得下「层 / ID / 值 / 时间」 */
 .page.voice {
   grid-template-columns: minmax(0, 1fr);

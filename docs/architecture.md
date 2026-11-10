@@ -4123,14 +4123,16 @@ judge 的产出要过逐字校验，共有四种结局：
 - `GET /api/world-book`（`:1211-1254`）：`items` 带 `scope` / `scopeId` / `name` / `entryCount` / `importedAt`，条目摘要给出 22 个可编辑字段（`content` 不下发，另给 `chars`，按码点算）。
 - `POST /api/world-book/import`（`:1256`）：body `{scope, scopeId, book}`，**整本覆盖该层**，回 `entryCount` / `ignored` / `warnings` / `replaced`（`replaced` = 该层原条目数）。
 - `DELETE /api/world-book`（`:1288`）：`scope` 与 `scopeId` 走 **JSON body**，不是 query 参数。
-- `GET /api/world-book/entry`（`:1302-1317`）与 `PUT /api/world-book/entry`（`:1321-1351`）：按 `scope` / `scopeId` / `id` 读写单条；PUT 只换同 id 那一条（`book: { ...record.book, entries: record.book.entries.map(...) }`），其余条目与 `ignored` / `warnings` 原样，不新增条目。
+- `GET /api/world-book/entry`（`:1313-1329`）与 `PUT /api/world-book/entry`（`:1332-1363`）：按 `scope` / `scopeId` / `id` 读写单条；PUT 只换同 id 那一条（`book: { ...record.book, entries: record.book.entries.map(...) }`），其余条目与 `ignored` / `warnings` 原样。
+- `POST /api/world-book/entry`（`:1366`）：新建单条，body `{scope, scopeId, bookName, entry}`。条目 id 由服务端分配（本书现有 max + 1，删掉的 id **不复用**，免得粘性 / 冷却记账串到新条目上），请求里带的 id 被忽略（`readWorldEntryInput` 的 `{ requireId: false }`，`:632`）。这一层还没有书时必须给非空 `bookName`（trim 后 1..80 字，`WORLD_BOOK_NAME_MAX` `:608`），顺手建一本；书已存在时忽略 `bookName`、沿用原书名。回 `{entry, name, entryCount, importedAt, createdBook}`。
+- `DELETE /api/world-book/entry`（`:1408`）：body `{scope, scopeId, id}`（JSON body，与删除整层一致）。删到一条不剩时连整本书一起移除（该层回到「未导入」，不会留一本空书遮住上层），回 `{ok, entryCount, removedBook}`。
 - 校验（`WorldEntryInput` / `readWorldEntryInput` `:629`、`readBoundedWorldInt` `:620`、`readWorldKeyList` `:608`、`readWorldEntryId` `:749`）：`position` ∈ `WORLD_POSITIONS`、`role` ∈ `system` / `user` / `assistant`、`depth` 0..50、`probability` 0..100、`groupWeight` 0..100000、`scanDepth` 为 `null` 或 1..20、`sticky` / `cooldown` 0..10000、`delay` 0..100000、`keys` / `secondaryKeys` 为字符串数组、`name` / `content` trim 后非空、布尔项必须布尔。越界不夹取而是拒掉，`detail` 点名第一项不合格的字段。
-- 错误码：store 没接线 `501 WORLDBOOK_UNAVAILABLE`；`scope` 非法 `400 BAD_SCOPE`；字段不合格 `400 BAD_WORLD_ENTRY`；解析失败 `400 BAD_WORLDBOOK` / `400 NO_WORLD_ENTRIES`；层或条目不存在 `404 WORLD_BOOK_NOT_FOUND` / `404 WORLD_ENTRY_NOT_FOUND`。PUT 先校验后查库（400 比 404 好定位）。
-- 后台：`web/src/pages/PromptsPage.tsx` 的「世界书」卡片 `:2307-2432`，条目摘要表 `renderWorldBookEntries` `:1410-1465`（只列前 50 行，`WORLD_BOOK_ROWS_LIMIT` `:210`），「操作」列与展开式编辑表单 `renderWorldBookEditor` `:1470-1800`（22 个控件覆盖契约全部字段，`depth` 只在 @D 时可编辑，`scanDepth` 留空 = 书级默认）。处理函数：`resetWorldBookEdit` `:1279`、`openWorldBookEdit` `:1295`、`updateWorldBookDraft` `:1323`，行内校验 `buildWorldEntry` `:334`；并发用 `worldBookEditEpoch` ref 防串（`:532`）。接口封装 `web/src/api.ts`：`WorldBookEntry` `:3082`、`WorldBookEntrySummary` `:3117`、`fetchWorldBookEntry` `:3398`、`saveWorldBookEntry` `:3413`、`describeWorldBookEntryError` `:3447`；样式 `web/src/styles.css:1488-1642`。
+- 错误码：store 没接线 `501 WORLDBOOK_UNAVAILABLE`；`scope` 非法 `400 BAD_SCOPE`；字段不合格 `400 BAD_WORLD_ENTRY`；解析失败 `400 BAD_WORLDBOOK` / `400 NO_WORLD_ENTRIES`；空层新建没给书名 `400 BAD_BOOK_NAME`；层或条目不存在 `404 WORLD_BOOK_NOT_FOUND` / `404 WORLD_ENTRY_NOT_FOUND`。PUT 与 POST 都先校验后查库（400 比 404 好定位）。
+- 后台：`web/src/pages/PromptsPage.tsx` 的「世界书」卡片 `:2475-2560`，「+ 新建条目」入口 `worldbook-entry-actions` `:2547`，条目摘要表 `renderWorldBookEntries` `:1535-1598`（只列前 50 行，`WORLD_BOOK_ROWS_LIMIT` `:210`），「操作」列「编辑」/「删除」`:1574`，展开式表单 `renderWorldBookEditor` `:1603-1950`（22 个控件覆盖契约全部字段，新建且这一层没有书时多一个必填书名栏 `:1654`，`depth` 只在 @D 时可编辑，`scanDepth` 留空 = 书级默认）。处理函数：`resetWorldBookEdit` `:1350`、`openWorldBookCreate` `:1369`、`openWorldBookEdit` `:1389`、`removeWorldBookEntry` `:1320`、`saveWorldBookForm` `:1432`、`updateWorldBookDraft` `:1421`，新建默认草稿 `newWorldEntryDraft` `:319`，行内校验 `buildWorldEntry` `:369`；并发用 `worldBookEditEpoch` ref 防串（`:571`）。接口封装 `web/src/api.ts`：`WorldBookEntry` `:3088`、`WorldBookEntrySummary` `:3123`、`WORLD_BOOK_NAME_MAX` `:3082`、`fetchWorldBookEntry` `:3404`、`saveWorldBookEntry` `:3419`、`createWorldBookEntry` `:3445`、`deleteWorldBookEntry` `:3474`、`describeWorldBookEntryError` `:3515`；样式 `web/src/styles.css:1488-1670`。
 
 ### 51.5 限制与已知偏离
 
-①只有关键词 / 常驻触发，没有向量检索、没有递归触发；②命中块总量仍 4000 字符，超出的条目静默不进块（记 `budget`）；③一本书整层覆盖，逐条编辑只能改已有条目，不能新增 / 删除单条；④概率用 `random()`，测试通过 `WorldSelectOptions.random` 注入；⑤粘性 / 冷却按 `(guild, channel, entryId)` 记账，换层重导同一本书时 id 相同的条目会继承旧账；⑥@D 的 depth 比 SillyTavern 差一位（见 51.3，刻意偏离）；⑦后台条目表只列前 50 行。
+①只有关键词 / 常驻触发，没有向量检索、没有递归触发；②命中块总量仍 4000 字符，超出的条目静默不进块（记 `budget`）；③一本书整层覆盖：导入仍会清掉这一层手工新建的条目；单条可以改、可以新建、可以删除，删掉最后一条连书一起移除；④概率用 `random()`，测试通过 `WorldSelectOptions.random` 注入；⑤粘性 / 冷却按 `(guild, channel, entryId)` 记账，换层重导同一本书时 id 相同的条目会继承旧账；⑥@D 的 depth 比 SillyTavern 差一位（见 51.3，刻意偏离）；⑦后台条目表只列前 50 行。
 
 ### 51.6 代码地图
 
@@ -5537,3 +5539,43 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 - 代码回到 `cd89dd2` 之前即可；`world_book_state` 表留着不影响旧代码（旧代码根本不读它），要清理就 `DROP TABLE world_book_state`。
 - 老世界书不用动：新字段全在 `book_json` 里，回滚后旧解析只读它认识的 12 个字段。
+
+
+## 78. 世界书后台新建与删除（worldbook-crud-1，2026-11-11）
+
+§77 把后台从「整本导入、只看摘要」扩成「逐条编辑」，但编辑只能改已有条目：想加一条手写的设定，只能自己拼一本 JSON 重新导入，而重新导入又会把这一层整本覆盖。这一版补上「新建条目」与「删除条目」，导入那条路保持原样。
+
+### 78.1 需求与决定
+
+
+三个决定（同轮访谈确认）：
+
+- 空层新建时**让用户自己填书名**（不是自动起名、也不是先导入一本）。一层一本书，书不存在时没有名字可用，表单里就多一个必填的「世界书名字」（trim 后 1..80 字）；书已存在时沿用原名，这一栏不显示。
+- 导入仍是**整层覆盖**，但确认文案要说明「这一层手工新建的条目也会被整本覆盖清掉」（`PromptsPage.tsx:1278-1281`）。不做合并：合并会让重导同一本书留下旧版本条目，越积越脏。
+- 顺带一起做**删除单条**，否则手工建错一条只能整本重导来清。
+
+### 78.2 接口
+
+两条新路由都在 `src/workers/http/app.ts`，错误码与校验口径沿用 §51.4：
+
+- `POST /api/world-book/entry`（`:1366`）：body `{scope, scopeId, bookName, entry}`。条目 id 由服务端分配 = 本书现有 max + 1，**请求里的 id 被忽略**（`readWorldEntryInput(value, { requireId: false })` `:632`，缺 id 不算错），删掉的 id 不复用——粘性 / 冷却按 entryId 记账，复用会让旧账落到新条目上。这一层没有书时必须给 `bookName`（否则 `400 BAD_BOOK_NAME`），顺手建一本，书名与第一条条目一起落库；已有书时忽略 `bookName`、沿用原书名，其余条目与 `ignored` / `warnings` 原样。回 `{entry, name, entryCount, importedAt, createdBook}`。
+- `DELETE /api/world-book/entry`（`:1408`）：body `{scope, scopeId, id}`（JSON body，与删除整层同一套）。删到一条不剩时**连整本书一起移除**（`store.remove`），这一层回到「未导入」：留一本 0 条目的书会遮住下层的书，而选择管线只按层取第一个存在的书。回 `{ok, entryCount, removedBook}`。
+
+### 78.3 后台
+
+- 卡片加「+ 新建条目」按钮（`PromptsPage.tsx:2547`，非 global 层要先填目标 ID 才可用）；点开在逐条编辑那块位置铺一份空白草稿（`newWorldEntryDraft` `:319`），标题「新建条目」、按钮「新建并保存」，22 个控件与行内校验复用编辑那一套。
+- 保存走 `saveWorldBookForm`（`:1432`）：新建分支先本地校验书名（与后端共用 `WORLD_BOOK_NAME_RULE` 一句文案），成功后 `resetWorldBookEdit` + `loadWorldBooks()` 整表重读这一层（书名、条目数、tab 上的「未导入 / 已导入 · N 条」都跟着变），提示分「已新建世界书「X」，并写入第一条「Y」」与「已新建「Y」」两种。
+- 每行操作列变成「编辑」+「删除」（`:1574`）。`removeWorldBookEntry`（`:1320`）用与「删除这一层的世界书」同一套 `window.confirm`，最后一条时确认文案会额外说明整本移除；成功后同样整表重读。删的正是表单里那一条时先收起表单——那个 id 已经作废了。
+- 导入确认文案追加一句（`:1280`）；空层提示改成「可以先导入，也可以直接新建条目」。
+
+### 78.4 门槛与验证
+
+- `npx tsc --noEmit -p tsconfig.json` 0；`npx vitest run` 94 文件 1751 例全过；`npm run test:node` 120 passed | 1 skipped；`npm run typecheck:web` 0；`npm run build:web` 成功（index-9t7ALRmT.css 24.08 kB、index-KI7t5rZl.js 427.51 kB）。
+- 接口测试：`test/worldbook.api.test.ts` 新增 9 例（新建到已有书 / 空层带书名 / 书名缺省·空白·超长 / 条目不合法且不落库 / 请求里的 id 被忽略 / 删中间一条 / 删最后一条连书移除 / 404 与 400 / 501 未接线），23 例全过；路由清单 `test/admin.crud.test.ts` 补两条，36 例全过。
+- 前端单测：`web/src/api.worldbook.test.ts` 6 例，覆盖 POST/DELETE 的 path、method、body 形状（bookName trim 后空串发 null）、回执解析与 `BAD_BOOK_NAME` / `BAD_WORLD_ENTRY` 文案。
+- 运行时：1280×800 深色，旧构建（`bd5cec6`）的条目表只有「编辑」、没有新建入口也没有删除列（`_dcai_preview/shots/table-with-edit-column.png`）；新构建的空层新建（书名栏）、建书成功（tab 变「已导入 · 1 条」）、已有书新建（无书名栏）、删中间一条、删最后一条回到「未导入」都在同目录的 `01`–`07` 截图里。
+- 原生 `window.confirm` 在无头 Chromium 里会阻塞渲染进程且拍不进页面截图：本次在预览 mock 注入 `window.confirm` 替身（非仓库文件），把它收到的三条原文记到 `/api/__mock/log`（删中间一条 / 删最后一条 / 导入覆盖），作为确认文案的硬证据；确认框本身没有截图。
+
+### 78.5 回滚
+
+- 只动代码，没有新迁移：前端回 `bd5cec6` 即可回到「只能导入 + 编辑」；后端两条新路由留着对旧前端无影响（旧前端不会调用）。

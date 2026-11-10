@@ -604,6 +604,9 @@ async function readJsonBody(c: Context): Promise<Record<string, unknown> | null>
 
 type WorldEntryInput = { ok: true; entry: WorldEntry } | { ok: false; detail: string };
 
+/** 空层新建时用户自己起的书名：够用就行，只挡空串与离谱长串 */
+const WORLD_BOOK_NAME_MAX = 80;
+
 /** 关键词列表与导入解析同一口径：去空白、丢掉空串（constant 条目可以本来就是空数组） */
 function readWorldKeyList(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
@@ -626,12 +629,20 @@ function readBoundedWorldInt(value: unknown, min: number, max: number): number |
  * PUT /api/world-book/entry 的单条校验：可编辑字段一个都不能少，detail 直接点名是第一项不合格的。
  * 合法值统一交给 normalizeWorldEntry 收口（trim、位置/角色的兜底都在那里）。
  */
-function readWorldEntryInput(value: unknown): WorldEntryInput {
+function readWorldEntryInput(value: unknown, options: { requireId?: boolean } = {}): WorldEntryInput {
   if (!isRecord(value)) return { ok: false, detail: 'entry 缺失或不是对象' };
   const fail = (field: string, rule: string): WorldEntryInput => ({ ok: false, detail: field + ' ' + rule });
 
-  const id = value['id'];
-  if (typeof id !== 'number' || !Number.isSafeInteger(id)) return fail('id', '必须是整数');
+  // 新建时 id 由服务端分配（本层 max + 1），请求里缺 id 不算错；PUT 仍然要带 id
+  let id = 0;
+  const rawId = value['id'];
+  if (rawId === undefined && options.requireId === false) {
+    id = 0;
+  } else if (typeof rawId !== 'number' || !Number.isSafeInteger(rawId)) {
+    return fail('id', '必须是整数');
+  } else {
+    id = rawId;
+  }
 
   const name = value['name'];
   if (typeof name !== 'string' || name.trim() === '') return fail('name', '不能为空');
@@ -1349,6 +1360,82 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
       },
     });
     return c.json({ entry });
+  });
+
+  // 新建单条：id 由服务端分配（本层 max + 1），空层带 bookName 时顺手建一本
+  app.post('/api/world-book/entry', async (c) => {
+    const store = deps.worldBooks;
+    if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
+    const body = await readJsonBody(c);
+    if (body === null) return badRequest(c);
+    const key = readScopeKey(body);
+    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
+    if (key === null) return badRequest(c);
+
+    // 校验先于查库：坏条目与「书不存在」无关，400 比 404 更好定位
+    const parsed = readWorldEntryInput(body['entry'], { requireId: false });
+    if (!parsed.ok) return c.json({ error: 'BAD_WORLD_ENTRY', detail: parsed.detail }, 400);
+
+    const existing = await store.get(key);
+    let bookName = existing === null ? '' : existing.name;
+    if (existing === null) {
+      // 空层没有书名可用：新建时必须是用户自己填的（导入那条路仍由酒馆的书名决定）
+      const raw = body['bookName'];
+      const name = typeof raw === 'string' ? raw.trim() : '';
+      if (name === '' || name.length > WORLD_BOOK_NAME_MAX) return c.json({ error: 'BAD_BOOK_NAME' }, 400);
+      bookName = name;
+    }
+
+    // 新 id 只在本书内唯一：删过的 id 不复用，避免粘性/冷却记账串到新条目上
+    const nextId = existing === null ? 1 : existing.book.entries.reduce((max, item) => Math.max(max, item.id), 0) + 1;
+    const entry: WorldEntry = { ...parsed.entry, id: nextId };
+    const book =
+      existing === null
+        ? { name: bookName, entries: [entry], ignored: [], warnings: [] }
+        : { ...existing.book, entries: [...existing.book.entries, entry] };
+
+    const saved = await store.put({ scope: key.scope, scopeId: key.scopeId, name: bookName, book });
+    return c.json({
+      entry,
+      name: saved.name,
+      entryCount: saved.entryCount,
+      importedAt: saved.importedAt,
+      createdBook: existing === null,
+    });
+  });
+
+  // 删除单条：删到一条不剩就连整本书一起移除，这一层回到「未导入」而不是空书遮住上层
+  app.delete('/api/world-book/entry', async (c) => {
+    const store = deps.worldBooks;
+    if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
+    const body = await readJsonBody(c);
+    if (body === null) return badRequest(c);
+    const key = readScopeKey(body);
+    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
+    if (key === null) return badRequest(c);
+
+    // 删除走 JSON body，id 是数字；读查询参数那套字符串口径在这不适用
+    const entryId = readBoundedWorldInt(body['id'], 0, Number.MAX_SAFE_INTEGER);
+    if (entryId === null) return c.json({ error: 'BAD_WORLD_ENTRY', detail: 'id 必须是非负整数' }, 400);
+
+    const record = await store.get(key);
+    if (record === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
+    if (!record.book.entries.some((item) => item.id === entryId)) {
+      return c.json({ error: 'WORLD_ENTRY_NOT_FOUND' }, 404);
+    }
+
+    const entries = record.book.entries.filter((item) => item.id !== entryId);
+    if (entries.length === 0) {
+      await store.remove(key);
+      return c.json({ ok: true, entryCount: 0, removedBook: true });
+    }
+    const saved = await store.put({
+      scope: key.scope,
+      scopeId: key.scopeId,
+      name: record.name,
+      book: { ...record.book, entries },
+    });
+    return c.json({ ok: true, entryCount: saved.entryCount, removedBook: false });
   });
 
   // 酒馆预设导入：整层覆盖目标层（global / guild / channel）的段，采样参数按同一层读旧值原样带过去。

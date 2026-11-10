@@ -14,14 +14,18 @@ import {
   PROMPT_ROLE_LABELS,
   TEMPLATE_VARS,
   WORLD_BOOK_IGNORE_REASONS,
+  WORLD_BOOK_NAME_MAX,
+  WORLD_BOOK_NAME_RULE,
   WORLD_COOLDOWN_MAX,
   WORLD_DELAY_MAX,
   WORLD_DEPTH_MAX,
   WORLD_ENTRY_ROLE_LABELS,
   WORLD_ENTRY_ROLES,
+  WORLD_GROUP_WEIGHT_DEFAULT,
   WORLD_GROUP_WEIGHT_MAX,
   WORLD_POSITION_LABELS,
   WORLD_POSITIONS,
+  WORLD_PROBABILITY_DEFAULT,
   WORLD_SCAN_DEPTH_DEFAULT,
   WORLD_SCAN_DEPTH_MAX,
   WORLD_SELECTIVE_LOGIC_LABELS,
@@ -30,7 +34,9 @@ import {
   api,
   clearPromptDefault,
   clearPromptInjection,
+  createWorldBookEntry,
   deleteWorldBook,
+  deleteWorldBookEntry,
   describeError,
   describePromptCopyRejection,
   describePromptDefaultsError,
@@ -309,6 +315,35 @@ function toWorldEntryDraft(entry: WorldBookEntry): WorldEntryDraft {
   };
 }
 
+/** 新建模式的草稿：id 固定 0（后端按本层 max id + 1 分配），其余取后端缺省口径。 */
+function newWorldEntryDraft(): WorldEntryDraft {
+  return {
+    id: 0,
+    name: '',
+    content: '',
+    enabled: true,
+    constant: false,
+    keys: '',
+    secondaryKeys: '',
+    caseSensitive: false,
+    wholeWords: false,
+    selective: false,
+    selectiveLogic: 'andAny',
+    position: 'anTop',
+    depth: String(WORLD_SCAN_DEPTH_DEFAULT),
+    role: 'system',
+    probability: String(WORLD_PROBABILITY_DEFAULT),
+    useProbability: false,
+    group: '',
+    groupWeight: String(WORLD_GROUP_WEIGHT_DEFAULT),
+    sticky: '0',
+    cooldown: '0',
+    delay: '0',
+    scanDepth: '',
+    order: '0',
+  };
+}
+
 /**
  * 整数输入：范围与后端 clamp 同界，超出就不发请求，免得后端静默截断。
  * 输入框不挂 min/max：浏览器会把键入值和回填值夹到边界（100001 显示成 100000），
@@ -528,6 +563,10 @@ export default function PromptsPage() {
   const [worldBookEditBusy, setWorldBookEditBusy] = useState(false);
   const [worldBookEditError, setWorldBookEditError] = useState('');
   const [worldBookEditFields, setWorldBookEditFields] = useState<WorldEntryFieldErrors>({});
+  // 新建模式与逐条编辑共用同一块表单与同一份草稿；这一层还没有书时多一个必填的书名。
+  const [worldBookCreating, setWorldBookCreating] = useState(false);
+  const [worldBookBookName, setWorldBookBookName] = useState('');
+  const [worldBookBookNameError, setWorldBookBookNameError] = useState('');
   // 换层 / 收起 / 再点另一行之后，先前发出的详情响应回来也不许再填回表单。
   const worldBookEditEpoch = useRef(0);
 
@@ -1237,7 +1276,8 @@ export default function PromptsPage() {
     const before = worldBookEntry === null ? 0 : worldBookEntry.entryCount;
     if (
       !window.confirm(
-        '导入会整层覆盖 ' + targetLabel + ' 现有的世界书：这一层旧条目全部作废，其它层不受影响。确定继续？',
+        '导入会整层覆盖 ' + targetLabel + ' 现有的世界书：这一层旧条目全部作废，其它层不受影响。' +
+          '这一层手工新建的条目也会被整本覆盖清掉。确定继续？',
       )
     ) {
       return;
@@ -1276,6 +1316,37 @@ export default function PromptsPage() {
     }
   }
 
+  // 删一条：二次确认沿用「删除这一层的世界书」那一套 window.confirm；删掉最后一条整本书就没了。
+  async function removeWorldBookEntry(item: WorldBookEntrySummary): Promise<void> {
+    if (worldBookBusy || worldBookEditBusy) return;
+    const targetLabel = describeScopeTarget(worldBookScope, worldBookTargetId);
+    const name = item.name.trim() === '' ? '无名条目' : item.name.trim();
+    const last = worldBookEntry !== null && worldBookEntry.entryCount <= 1;
+    const tail = last
+      ? '这是最后一条：删完这一层的世界书整本移除，这一层回到「未导入」。'
+      : '其它条目和别的层都不动。';
+    if (!window.confirm('确定删掉 ' + targetLabel + ' 的「' + name + '」？' + tail)) return;
+    setWorldBookError('');
+    setWorldBookMessage('');
+    setWorldBookResult(null);
+    setWorldBookBusy(true);
+    try {
+      const result = await deleteWorldBookEntry({ scope: worldBookScope, scopeId: worldBookTargetId, id: item.id });
+      // 删的正是表单里那一条：id 已经作废，表单要收起。
+      if (worldBookEditId === item.id) resetWorldBookEdit();
+      await loadWorldBooks();
+      setWorldBookMessage(
+        result.removedBook
+          ? '已删除「' + name + '」：这一层没有条目了，世界书整本移除'
+          : '已删除「' + name + '」',
+      );
+    } catch (err) {
+      setWorldBookError(describeWorldBookEntryError(err));
+    } finally {
+      setWorldBookBusy(false);
+    }
+  }
+
   function resetWorldBookEdit(): void {
     worldBookEditEpoch.current += 1;
     setWorldBookEditId(null);
@@ -1284,11 +1355,34 @@ export default function PromptsPage() {
     setWorldBookEditBusy(false);
     setWorldBookEditError('');
     setWorldBookEditFields({});
+    setWorldBookCreating(false);
+    setWorldBookBookName('');
+    setWorldBookBookNameError('');
   }
 
   function closeWorldBookEdit(): void {
     if (worldBookEditBusy) return;
     resetWorldBookEdit();
+  }
+
+  // 新建：就在逐条编辑那块位置上铺一份空白草稿；这一层没有书时表单里多一个书名。
+  function openWorldBookCreate(): void {
+    if (worldBookEditBusy) return;
+    if (worldBookCreating) {
+      resetWorldBookEdit();
+      return;
+    }
+    worldBookEditEpoch.current += 1;
+    setWorldBookEditId(null);
+    setWorldBookDraft(newWorldEntryDraft());
+    setWorldBookEditLoading(false);
+    setWorldBookEditBusy(false);
+    setWorldBookEditError('');
+    setWorldBookEditFields({});
+    setWorldBookCreating(true);
+    setWorldBookBookName('');
+    setWorldBookBookNameError('');
+    setWorldBookError('');
   }
 
   // 点一行：读这一条的正文再铺成表单；点正在编辑的那行就收起。
@@ -1298,6 +1392,10 @@ export default function PromptsPage() {
       resetWorldBookEdit();
       return;
     }
+    // 从新建切到编辑：新建那份草稿连书名一起丢掉。
+    setWorldBookCreating(false);
+    setWorldBookBookName('');
+    setWorldBookBookNameError('');
     const scope = worldBookScope;
     const scopeId = worldBookTargetId;
     const epoch = worldBookEditEpoch.current + 1;
@@ -1331,13 +1429,26 @@ export default function PromptsPage() {
     });
   }
 
-  async function saveWorldBookEdit(): Promise<void> {
+  async function saveWorldBookForm(): Promise<void> {
     if (worldBookDraft === null || worldBookEditBusy) return;
+    const creating = worldBookCreating;
     const built = buildWorldEntry(worldBookDraft);
     if (!built.ok) {
       setWorldBookEditFields(built.errors);
       setWorldBookEditError('');
       return;
+    }
+    // 这一层还没有书：书名必填（trim 后 1..80 字），提示语与后端 BAD_BOOK_NAME 共用一句。
+    const needsBookName = creating && worldBookEntry === null;
+    let bookName: string | null = null;
+    if (needsBookName) {
+      const trimmed = worldBookBookName.trim();
+      if (trimmed === '' || trimmed.length > WORLD_BOOK_NAME_MAX) {
+        setWorldBookBookNameError(WORLD_BOOK_NAME_RULE);
+        setWorldBookEditError('');
+        return;
+      }
+      bookName = trimmed;
     }
     const scope = worldBookScope;
     const scopeId = worldBookTargetId;
@@ -1345,7 +1456,21 @@ export default function PromptsPage() {
     setWorldBookEditBusy(true);
     setWorldBookEditError('');
     setWorldBookEditFields({});
+    setWorldBookBookNameError('');
     try {
+      if (creating) {
+        const created = await createWorldBookEntry({ scope, scopeId, bookName, entry: built.entry });
+        // 新建可能顺带建了一本书：书名、条目数、「未导入」状态都变了，整表重读这一层。
+        resetWorldBookEdit();
+        await loadWorldBooks();
+        const label = created.entry.name.trim() === '' ? '无名条目' : created.entry.name.trim();
+        setWorldBookMessage(
+          created.createdBook
+            ? '已新建世界书「' + (created.name === '' ? label : created.name) + '」，并写入第一条「' + label + '」'
+            : '已新建「' + label + '」',
+        );
+        return;
+      }
       const saved = await saveWorldBookEntry(scope, scopeId, built.entry);
       const summary = toWorldEntrySummary(saved);
       // 只换这一层这一行：不重拉整表，别的层和别的行都不动。
@@ -1446,33 +1571,50 @@ export default function PromptsPage() {
                   <td>{item.enabled ? (item.constant ? '常驻' : '普通') : '停用'}</td>
                   <td className="worldbook-chars">{formatNumber(item.chars)}</td>
                   <td className="worldbook-op">
-                    <button
-                      type="button"
-                      className="link small"
-                      disabled={worldBookEditBusy}
-                      onClick={() => void openWorldBookEdit(item)}
-                    >
-                      {worldBookEditId === item.id ? '收起' : '编辑'}
-                    </button>
+                    <span className="worldbook-op-actions">
+                      <button
+                        type="button"
+                        className="link small"
+                        disabled={worldBookEditBusy || worldBookBusy}
+                        onClick={() => void openWorldBookEdit(item)}
+                      >
+                        {worldBookEditId === item.id ? '收起' : '编辑'}
+                      </button>
+                      <button
+                        type="button"
+                        className="link small danger"
+                        disabled={worldBookEditBusy || worldBookBusy}
+                        onClick={() => void removeWorldBookEntry(item)}
+                      >
+                        删除
+                      </button>
+                    </span>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        {renderWorldBookEditor()}
       </div>
     );
   }
 
-  // 逐条编辑区：同页展开，不弹窗。字段顺序按契约分组：基本 / 关键词 / 触发 / 排序。
+  // 逐条编辑 / 新建区：同页展开，不弹窗。字段顺序按契约分组：基本 / 关键词 / 触发 / 排序。
   function renderWorldBookEditor(): ReactElement | null {
-    if (worldBookEditId === null) return null;
+    if (worldBookEditId === null && !worldBookCreating) return null;
     const draft = worldBookDraft;
-    const title = draft === null ? '条目 #' + String(worldBookEditId) : draft.name.trim() === '' ? '（无名条目）' : draft.name;
+    const title =
+      draft === null
+        ? '条目 #' + String(worldBookEditId)
+        : draft.name.trim() === ''
+          ? '（无名条目）'
+          : draft.name;
+    // 这一层还没有书：新建时书名必填；已有书就沿用原名，表单里不再问。
+    const needsBookName = worldBookCreating && worldBookEntry === null;
+    const submitLabel = worldBookCreating ? '新建并保存' : '保存';
     const head = (
       <div className="worldbook-editor-head">
-        <h3>编辑条目 · {title}</h3>
+        <h3>{worldBookCreating ? '新建条目' : '编辑条目 · ' + title}</h3>
         <button type="button" className="ghost small" disabled={worldBookEditBusy} onClick={closeWorldBookEdit}>
           收起
         </button>
@@ -1505,10 +1647,35 @@ export default function PromptsPage() {
         noValidate
         onSubmit={(event) => {
           event.preventDefault();
-          void saveWorldBookEdit();
+          void saveWorldBookForm();
         }}
       >
         {head}
+        {needsBookName ? (
+          <label className="field">
+            <span>世界书名字（这一层还没有世界书，保存时按它新建一本，{String(WORLD_BOOK_NAME_MAX)} 字以内）</span>
+            <input
+              type="text"
+              value={worldBookBookName}
+              maxLength={WORLD_BOOK_NAME_MAX}
+              disabled={worldBookEditBusy}
+              onChange={(event) => {
+                setWorldBookBookName(event.target.value);
+                setWorldBookBookNameError('');
+              }}
+            />
+            {worldBookBookNameError === '' ? null : <span className="field-error">{worldBookBookNameError}</span>}
+          </label>
+        ) : null}
+        {worldBookCreating ? (
+          <p className="hint">
+            {needsBookName
+              ? '保存后这一层就有世界书了：条目 id 由服务端分配，写进去的是第一条。'
+              : '保存后写进这一层现有的世界书「' +
+                (worldBookEntry === null || worldBookEntry.name === '' ? '这本没有名字' : worldBookEntry.name) +
+                '」，书名不变。'}
+          </p>
+        ) : null}
         <div className="worldbook-editor-group">
           <h4>基本</h4>
           <label className="field">
@@ -1770,7 +1937,7 @@ export default function PromptsPage() {
         {worldBookEditError === '' ? null : <p className="error">{worldBookEditError}</p>}
         <div className="actions">
           <button type="submit" className="primary" disabled={worldBookEditBusy}>
-            {worldBookEditBusy ? '保存中…' : '保存'}
+            {worldBookEditBusy ? '保存中…' : submitLabel}
           </button>
           <button type="button" className="ghost" disabled={worldBookEditBusy} onClick={closeWorldBookEdit}>
             取消
@@ -2344,7 +2511,9 @@ export default function PromptsPage() {
               />
             </label>
             {worldBookTargets(worldBookScope).length === 0 ? (
-              <p className="hint">这一层还没有导入过世界书：上面填 {PROMPT_SCOPE_TITLES[worldBookScope]} ID 就能开始导。</p>
+              <p className="hint">
+                这一层还没有导入过世界书：上面填 {PROMPT_SCOPE_TITLES[worldBookScope]} ID 就能开始导，填好也能直接新建条目。
+              </p>
             ) : (
               <p className="prompt-target-chips">
                 <span className="hint">已导入的{PROMPT_SCOPE_TITLES[worldBookScope]}：</span>
@@ -2372,7 +2541,24 @@ export default function PromptsPage() {
             <span className="badge">{describeScopeTarget(worldBookEntry.scope, worldBookEntry.scopeId)}</span>
           </div>
         )}
+        {worldBookEntry === null && (worldBookScope === 'global' || worldBookTargetId.trim() !== '') ? (
+          <p className="hint">这一层还没有世界书：可以先导入，也可以直接新建条目。</p>
+        ) : null}
+        <div className="worldbook-entry-actions">
+          <button
+            type="button"
+            className="ghost small"
+            disabled={
+              worldBookBusy || worldBookEditBusy || (worldBookScope !== 'global' && worldBookTargetId.trim() === '')
+            }
+            onClick={openWorldBookCreate}
+          >
+            {worldBookCreating ? '收起新建' : '+ 新建条目'}
+          </button>
+          <span className="hint">新建只加这一条，不动这一层已有的条目。</span>
+        </div>
         {renderWorldBookEntries()}
+        {renderWorldBookEditor()}
         <div className="row">
           <label className="field">
             <span>世界书文件（.json 或角色卡 V2）</span>

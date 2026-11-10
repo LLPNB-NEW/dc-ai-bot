@@ -3078,6 +3078,12 @@ export const WORLD_STICKY_MAX = 10000;
 export const WORLD_COOLDOWN_MAX = 10000;
 export const WORLD_DELAY_MAX = 100000;
 
+/** 新建世界书时书名的长度上限：与 POST /api/world-book/entry 的 BAD_BOOK_NAME 同口径（trim 后 1..80 字）。 */
+export const WORLD_BOOK_NAME_MAX = 80;
+
+/** 页内校验与 BAD_BOOK_NAME 共用这一句，别写两份文案。 */
+export const WORLD_BOOK_NAME_RULE = '世界书名字必填，且不超过 80 字';
+
 /** 一条完整条目：GET /api/world-book/entry 的 entry 与 PUT 的 entry 都是这个形状。 */
 export interface WorldBookEntry {
   id: number;
@@ -3421,6 +3427,68 @@ export async function saveWorldBookEntry(scope: Scope, scopeId: string, entry: W
   return saved;
 }
 
+/** POST /api/world-book/entry 的 200：新建一条，id 由服务端分配（本层现有 max id + 1）。 */
+export interface WorldBookCreateResult {
+  entry: WorldBookEntry;
+  /** 这一层现在的书名：createdBook 为 true 时就是这次建出来的名字。 */
+  name: string;
+  entryCount: number;
+  importedAt: string;
+  /** true = 这一层原来没有世界书，这次顺带建了一本。 */
+  createdBook: boolean;
+}
+
+/**
+ * 契约 world-book：POST /api/world-book/entry body { scope, scopeId, bookName, entry }。
+ * 请求里的 entry.id 被后端忽略（新建传 0 即可）；bookName 只在层里还没有书时有用，有书时传 null 沿用原书名。
+ */
+export async function createWorldBookEntry(input: {
+  scope: Scope;
+  scopeId: string;
+  bookName?: string | null;
+  entry: WorldBookEntry;
+}): Promise<WorldBookCreateResult> {
+  const bookName = typeof input.bookName === 'string' ? input.bookName.trim() : '';
+  const raw = await request<unknown>('POST', '/api/world-book/entry', {
+    scope: input.scope,
+    scopeId: normalizeScopeId(input.scope, typeof input.scopeId === 'string' ? input.scopeId : ''),
+    bookName: bookName === '' ? null : bookName,
+    entry: input.entry,
+  });
+  const source = toRecord(raw);
+  const entry = toWorldBookEntryDetail(source.entry);
+  if (entry === null) throw new ApiError(0, { error: 'BAD_RESPONSE' }, '新建成功，但接口回的条目形状不认识');
+  return {
+    entry,
+    name: typeof source.name === 'string' ? source.name : '',
+    entryCount: toCount(source.entryCount),
+    importedAt: typeof source.importedAt === 'string' ? source.importedAt : '',
+    createdBook: source.createdBook === true,
+  };
+}
+
+/**
+ * 契约 world-book：DELETE /api/world-book/entry body { scope, scopeId, id }（与 DELETE /api/world-book 一样走 JSON body）。
+ * removedBook: true = 删掉的是最后一条，这一层的世界书整本被移除，回到「未导入」。
+ */
+export async function deleteWorldBookEntry(input: {
+  scope: Scope;
+  scopeId: string;
+  id: number;
+}): Promise<{ ok: true; entryCount: number; removedBook: boolean }> {
+  const raw = await request<unknown>('DELETE', '/api/world-book/entry', {
+    scope: input.scope,
+    scopeId: normalizeScopeId(input.scope, typeof input.scopeId === 'string' ? input.scopeId : ''),
+    id: input.id,
+  });
+  const source = toRecord(raw);
+  return {
+    ok: true,
+    entryCount: toCount(source.entryCount),
+    removedBook: source.removedBook === true,
+  };
+}
+
 /** 世界书的 400 / 501 码翻成中文再显示；BAD_SCOPE 与 401 交给 describeError，别写两套文案。 */
 export function describeWorldBookError(error: unknown): string {
   if (error instanceof ApiError) {
@@ -3449,6 +3517,9 @@ export function describeWorldBookEntryError(error: unknown): string {
     const detail = typeof error.payload['detail'] === 'string' ? error.payload['detail'] : '';
     if (error.code === 'BAD_WORLD_ENTRY') {
       return detail !== '' ? '条目没保存：' + detail : '条目没保存：后端说字段不合法，检查一下数值范围和必填项';
+    }
+    if (error.code === 'BAD_BOOK_NAME') {
+      return WORLD_BOOK_NAME_RULE;
     }
     if (error.code === 'WORLD_BOOK_NOT_FOUND') {
       return '这一层的世界书不见了（404）：可能刚被删除或换了层，关掉表单刷新后再试';

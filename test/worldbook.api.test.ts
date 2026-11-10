@@ -568,3 +568,211 @@ describe('admin world book single entry', () => {
     expect(await badScope.json()).toEqual({ error: 'BAD_SCOPE' });
   });
 });
+
+/** 新建用的合法条目：新建时 id 由服务端给，所以这里不带 id */
+function entryInput(overrides: Json = {}): Json {
+  return {
+    name: '手工条目',
+    keys: ['手写'],
+    secondaryKeys: [],
+    content: '手写正文',
+    enabled: true,
+    constant: false,
+    selective: true,
+    selectiveLogic: 'andAny',
+    order: 100,
+    caseSensitive: false,
+    wholeWords: false,
+    position: 'anTop',
+    depth: 4,
+    role: 'system',
+    probability: 100,
+    useProbability: false,
+    group: '',
+    groupWeight: 100,
+    sticky: 0,
+    cooldown: 0,
+    delay: 0,
+    scanDepth: null,
+    ...overrides,
+  };
+}
+
+describe('admin world book create and delete entry', () => {
+  it('POST 新建到已有的书：id 给 max+1，其余条目逐字不变，GET 读回同一条', async () => {
+    const { app, cookie } = await setup();
+    await importSample(app, cookie);
+    const sibling = (await singleOf(app, cookie, '1')).body['entry'] as Json;
+
+    const res = await send(
+      app,
+      'POST',
+      '/api/world-book/entry',
+      { scope: 'global', scopeId: '', bookName: null, entry: entryInput({ name: '手写第二条' }) },
+      cookie,
+    );
+    expect(res.status).toBe(200);
+    const saved = await jsonOf(res);
+    const entry = saved['entry'] as Json;
+    // 导入的两条 id 是 0/1，新条目接在 2
+    expect(entry['id']).toBe(2);
+    expect(entry['name']).toBe('手写第二条');
+    // 已有书：书名沿用导入那份，createdBook 为 false
+    expect(saved['createdBook']).toBe(false);
+    expect(saved['name']).toBe('测试世界书');
+    expect(saved['entryCount']).toBe(3);
+
+    const read = await singleOf(app, cookie, '2');
+    expect(read.status).toBe(200);
+    expect(read.body['entry']).toEqual(entry);
+    expect((await singleOf(app, cookie, '1')).body['entry']).toEqual(sibling);
+  });
+
+  it('POST 空层带 bookName：顺手建一本，书名与条目都读得回来', async () => {
+    const { app, cookie } = await setup();
+    const res = await send(
+      app,
+      'POST',
+      '/api/world-book/entry',
+      { scope: 'guild', scopeId: 'g1', bookName: '  我自己的书  ', entry: entryInput() },
+      cookie,
+    );
+    expect(res.status).toBe(200);
+    const saved = await jsonOf(res);
+    expect(saved['createdBook']).toBe(true);
+    expect(saved['name']).toBe('我自己的书');
+    expect(saved['entryCount']).toBe(1);
+    expect((saved['entry'] as Json)['id']).toBe(1);
+
+    const items = await itemsOf(app, cookie);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ scope: 'guild', scopeId: 'g1', name: '我自己的书', entryCount: 1 });
+  });
+
+  it('POST 空层缺书名 / 空白 / 超长：400 BAD_BOOK_NAME，一条都不落库', async () => {
+    const { app, cookie } = await setup();
+    for (const bookName of [null, '   ', 'x'.repeat(81), 42]) {
+      const res = await send(
+        app,
+        'POST',
+        '/api/world-book/entry',
+        { scope: 'global', scopeId: '', bookName, entry: entryInput() },
+        cookie,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'BAD_BOOK_NAME' });
+    }
+    expect(await itemsOf(app, cookie)).toEqual([]);
+  });
+
+  it('POST 条目不合法：400 BAD_WORLD_ENTRY 并点名，缺 id 不算错（新建时由服务端分配）', async () => {
+    const { app, cookie } = await setup();
+    await importSample(app, cookie);
+
+    const noName = await send(
+      app,
+      'POST',
+      '/api/world-book/entry',
+      { scope: 'global', scopeId: '', entry: entryInput({ name: '   ' }) },
+      cookie,
+    );
+    expect(noName.status).toBe(400);
+    expect(await noName.json()).toEqual({ error: 'BAD_WORLD_ENTRY', detail: 'name 不能为空' });
+
+    const badDepth = await send(
+      app,
+      'POST',
+      '/api/world-book/entry',
+      { scope: 'global', scopeId: '', entry: entryInput({ depth: 51 }) },
+      cookie,
+    );
+    expect(badDepth.status).toBe(400);
+    expect(((await badDepth.json()) as Json)['detail']).toBe('depth 必须是 0..50 的整数');
+
+    // 失败不落库：导入的两条还在
+    expect(((await itemsOf(app, cookie))[0] as Json)['entryCount']).toBe(2);
+  });
+
+  it('POST 请求里的 id 被忽略：新 id 仍然接在本书最大 id 之后', async () => {
+    const { app, cookie } = await setup();
+    await importSample(app, cookie);
+    const res = await send(
+      app,
+      'POST',
+      '/api/world-book/entry',
+      { scope: 'global', scopeId: '', entry: entryInput({ id: 99 }) },
+      cookie,
+    );
+    expect(res.status).toBe(200);
+    expect(((await jsonOf(res))['entry'] as Json)['id']).toBe(2);
+  });
+
+  it('DELETE 中间一条：只少这一条，其余逐字不变', async () => {
+    const { app, cookie } = await setup();
+    await importSample(app, cookie);
+    const first = (await singleOf(app, cookie, '0')).body['entry'] as Json;
+
+    const res = await send(app, 'DELETE', '/api/world-book/entry', { scope: 'global', scopeId: '', id: 1 }, cookie);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, entryCount: 1, removedBook: false });
+
+    expect((await singleOf(app, cookie, '1')).status).toBe(404);
+    expect((await singleOf(app, cookie, '0')).body['entry']).toEqual(first);
+  });
+
+  it('DELETE 最后一条：整本书一起移除，这一层回到未导入', async () => {
+    const { app, cookie } = await setup();
+    const created = await send(
+      app,
+      'POST',
+      '/api/world-book/entry',
+      { scope: 'channel', scopeId: 'c1', bookName: '临时书', entry: entryInput() },
+      cookie,
+    );
+    expect(created.status).toBe(200);
+
+    const res = await send(app, 'DELETE', '/api/world-book/entry', { scope: 'channel', scopeId: 'c1', id: 1 }, cookie);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, entryCount: 0, removedBook: true });
+
+    expect(await itemsOf(app, cookie)).toEqual([]);
+    expect(await singleOf(app, cookie, '1')).toEqual({ status: 404, body: { error: 'WORLD_BOOK_NOT_FOUND' } });
+  });
+
+  it('DELETE 错误：书不存在 / 条目不存在 404，id 不是非负整数与非法层 400', async () => {
+    const { app, cookie } = await setup();
+    const noBook = await send(app, 'DELETE', '/api/world-book/entry', { scope: 'global', scopeId: '', id: 0 }, cookie);
+    expect(noBook.status).toBe(404);
+    expect(await noBook.json()).toEqual({ error: 'WORLD_BOOK_NOT_FOUND' });
+
+    await importSample(app, cookie);
+    const noEntry = await send(app, 'DELETE', '/api/world-book/entry', { scope: 'global', scopeId: '', id: 99 }, cookie);
+    expect(noEntry.status).toBe(404);
+    expect(await noEntry.json()).toEqual({ error: 'WORLD_ENTRY_NOT_FOUND' });
+
+    for (const id of ['1', -1, 1.5, null]) {
+      const res = await send(app, 'DELETE', '/api/world-book/entry', { scope: 'global', scopeId: '', id }, cookie);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as Json)['error']).toBe('BAD_WORLD_ENTRY');
+    }
+
+    const badScope = await send(app, 'DELETE', '/api/world-book/entry', { scope: 'team', scopeId: '', id: 0 }, cookie);
+    expect(badScope.status).toBe(400);
+    expect(await badScope.json()).toEqual({ error: 'BAD_SCOPE' });
+  });
+
+  it('仓储未接线：新建与删除单条都回 501', async () => {
+    const { app, cookie } = await setup({ wired: false });
+    for (const method of ['POST', 'DELETE']) {
+      const res = await send(
+        app,
+        method,
+        '/api/world-book/entry',
+        { scope: 'global', scopeId: '', bookName: '书', entry: entryInput(), id: 0 },
+        cookie,
+      );
+      expect(res.status).toBe(501);
+      expect(await res.json()).toEqual({ error: 'WORLDBOOK_UNAVAILABLE' });
+    }
+  });
+});

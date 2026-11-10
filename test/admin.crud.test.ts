@@ -1112,6 +1112,7 @@ describe('admin route table', () => {
       'POST /api/summaries/sweep',
       'POST /api/tts-settings/test',
       'POST /api/world-book/import',
+      'POST /api/world-book/entry',
       'PUT /api/body-emoji-guides',
       'PUT /api/emoji-aliases',
       'PUT /api/memory-settings',
@@ -1147,6 +1148,7 @@ describe('admin route table', () => {
       'DELETE /api/tts-style',
       'DELETE /api/voice-settings',
       'DELETE /api/world-book',
+      'DELETE /api/world-book/entry',
       'DELETE /api/routes',
       'DELETE /api/summaries',
     ].sort();
