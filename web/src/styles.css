@@ -1554,6 +1554,93 @@ fieldset.fallbacks legend {
   font-variant-numeric: tabular-nums;
 }
 
+/* 条目编辑：表格下面同页长出一块表单，不弹窗；交互沿用 .field / .row / .actions 的老习惯 */
+.page.prompts .worldbook-op {
+  width: 1%;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* 正在编辑的那行给个底色，并且不被停用条目的删除线带跑 */
+.page.prompts .worldbook-row.editing td {
+  background: var(--panel-2);
+  text-decoration: none;
+}
+
+/* 停用条目整行划掉，但「编辑」还是能点的操作，按钮本身别跟着划 */
+.page.prompts .worldbook-op button {
+  text-decoration: none;
+}
+
+.page.prompts .worldbook-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.page.prompts .worldbook-editor-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.page.prompts .worldbook-editor-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.page.prompts .worldbook-editor-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.page.prompts .worldbook-editor-group h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.page.prompts .worldbook-editor .row {
+  align-items: flex-end;
+}
+
+/* 只有并排的 .row 里才按基线分担宽度；直接挂在分组下的字段按自身高度排，别被 flex-basis 撑成一条空白 */
+.page.prompts .worldbook-editor .row .field {
+  flex: 1 1 180px;
+}
+
+.page.prompts .worldbook-editor-group > .field {
+  flex: 0 0 auto;
+}
+
+.page.prompts .worldbook-editor .row.checkbox {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+}
+
+.page.prompts .worldbook-editor-flags {
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.page.prompts .worldbook-editor .field-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+
 /* 门牌 prompt-copy-1 语音页：接口卡片在上、语音回复与朗读语气卡片在下；单列才排得下「层 / ID / 值 / 时间」 */
 .page.voice {
   grid-template-columns: minmax(0, 1fr);

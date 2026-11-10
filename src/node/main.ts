@@ -178,6 +178,8 @@ function createRequestHandlers(db: SqlDatabase, env: NodeEnv, tracker: TaskTrack
   // summaries 随 createRepositories 的返回值一起被 ...data 带进来（§17.2）
   const chat = createChatService({
     ...data,
+    // 世界书的粘性/冷却记账与书同库：显式写出来，读代码时不用再追 createRepositories 的返回类型
+    worldBookState: data.worldBookState,
     providers: providers(),
     config: CHAT_CONFIG,
     background: (task: Promise<unknown>) => tracker.waitUntil(task),

@@ -14,6 +14,19 @@ import {
   PROMPT_ROLE_LABELS,
   TEMPLATE_VARS,
   WORLD_BOOK_IGNORE_REASONS,
+  WORLD_COOLDOWN_MAX,
+  WORLD_DELAY_MAX,
+  WORLD_DEPTH_MAX,
+  WORLD_ENTRY_ROLE_LABELS,
+  WORLD_ENTRY_ROLES,
+  WORLD_GROUP_WEIGHT_MAX,
+  WORLD_POSITION_LABELS,
+  WORLD_POSITIONS,
+  WORLD_SCAN_DEPTH_DEFAULT,
+  WORLD_SCAN_DEPTH_MAX,
+  WORLD_SELECTIVE_LOGIC_LABELS,
+  WORLD_SELECTIVE_LOGICS,
+  WORLD_STICKY_MAX,
   api,
   clearPromptDefault,
   clearPromptInjection,
@@ -24,8 +37,10 @@ import {
   describePromptImportError,
   describePromptInjectionError,
   describeScopeTarget,
+  describeWorldBookEntryError,
   describeWorldBookError,
   fetchPromptDefaults,
+  fetchWorldBookEntry,
   fetchPromptInjections,
   fetchWorldBook,
   formatNumber,
@@ -35,6 +50,7 @@ import {
   previewPromptDefault,
   savePromptDefault,
   savePromptInjection,
+  saveWorldBookEntry,
   type InjectionRole,
   type PromptCopyResult,
   type PromptDefaultEntry,
@@ -49,10 +65,14 @@ import {
   type PromptRole,
   type PromptSegmentInput,
   type Scope,
+  type WorldBookEntry,
   type WorldBookEntrySummary,
   type WorldBookIgnoreReason,
   type WorldBookImportResult,
   type WorldBookLayer,
+  type WorldEntryRole,
+  type WorldPosition,
+  type WorldSelectiveLogic,
 } from '../api';
 import ScopeField from '../components/ScopeField';
 
@@ -206,6 +226,215 @@ function describeWorldBookOutcome(result: WorldBookImportResult, before: number)
   return '已写入 ' + String(result.entryCount) + ' 条（覆盖 ' + String(replaced) + ' 条）';
 }
 
+// 逐条编辑：数字字段先存字符串，留空与越界统一在保存前判，输入过程中不拦人。
+interface WorldEntryDraft {
+  id: number;
+  name: string;
+  content: string;
+  enabled: boolean;
+  constant: boolean;
+  /** 关键词输入框的原文：逗号或换行分隔，保存时才拆成数组。 */
+  keys: string;
+  secondaryKeys: string;
+  caseSensitive: boolean;
+  wholeWords: boolean;
+  selective: boolean;
+  selectiveLogic: WorldSelectiveLogic;
+  position: WorldPosition;
+  depth: string;
+  role: WorldEntryRole;
+  probability: string;
+  useProbability: boolean;
+  group: string;
+  groupWeight: string;
+  sticky: string;
+  cooldown: string;
+  delay: string;
+  scanDepth: string;
+  order: string;
+}
+
+/** 需要行内提示的字段：其余字段是勾选 / 下拉，前端没有可校验的输入。 */
+type WorldEntryFieldKey =
+  | 'name'
+  | 'content'
+  | 'depth'
+  | 'probability'
+  | 'groupWeight'
+  | 'sticky'
+  | 'cooldown'
+  | 'delay'
+  | 'scanDepth'
+  | 'order';
+
+type WorldEntryFieldErrors = Partial<Record<WorldEntryFieldKey, string>>;
+
+/** 关键词输入框：中英文逗号与换行都算分隔符，空白项丢掉（与后端 readKeys 同口径）。 */
+function splitWorldKeys(text: string): string[] {
+  return text
+    .split(/[,，\n]/)
+    .map((item) => item.trim())
+    .filter((item) => item !== '');
+}
+
+function joinWorldKeys(keys: readonly string[]): string {
+  return keys.join(', ');
+}
+
+function toWorldEntryDraft(entry: WorldBookEntry): WorldEntryDraft {
+  return {
+    id: entry.id,
+    name: entry.name,
+    content: entry.content,
+    enabled: entry.enabled,
+    constant: entry.constant,
+    keys: joinWorldKeys(entry.keys),
+    secondaryKeys: joinWorldKeys(entry.secondaryKeys),
+    caseSensitive: entry.caseSensitive,
+    wholeWords: entry.wholeWords,
+    selective: entry.selective,
+    selectiveLogic: entry.selectiveLogic,
+    position: entry.position,
+    depth: String(entry.depth),
+    role: entry.role,
+    probability: String(entry.probability),
+    useProbability: entry.useProbability,
+    group: entry.group,
+    groupWeight: String(entry.groupWeight),
+    sticky: String(entry.sticky),
+    cooldown: String(entry.cooldown),
+    delay: String(entry.delay),
+    scanDepth: entry.scanDepth === null ? '' : String(entry.scanDepth),
+    order: String(entry.order),
+  };
+}
+
+/**
+ * 整数输入：范围与后端 clamp 同界，超出就不发请求，免得后端静默截断。
+ * 输入框不挂 min/max：浏览器会把键入值和回填值夹到边界（100001 显示成 100000），
+ * 行内提示就永远看不到，state 与 DOM 也会对不上。
+ */
+function readWorldInteger(
+  raw: string,
+  min: number | null,
+  max: number | null,
+  label: string,
+): { ok: true; value: number } | { ok: false; error: string } {
+  const text = raw.trim();
+  if (text === '') return { ok: false, error: label + '必填' };
+  const value = Number(text);
+  // isSafeInteger 一并挡掉 NaN/Infinity/小数：接口校验只收安全整数。
+  if (!Number.isSafeInteger(value)) return { ok: false, error: label + '要填整数' };
+  if (min !== null && value < min) return { ok: false, error: label + '不能小于 ' + String(min) };
+  if (max !== null && value > max) return { ok: false, error: label + '不能大于 ' + String(max) };
+  return { ok: true, value };
+}
+
+/** 保存前一次收齐所有问题：返回 entry 才能发请求，返回 errors 就逐个字段标红。 */
+function buildWorldEntry(
+  draft: WorldEntryDraft,
+): { ok: true; entry: WorldBookEntry } | { ok: false; errors: WorldEntryFieldErrors } {
+  const errors: WorldEntryFieldErrors = {};
+  const name = draft.name.trim();
+  if (name === '') errors.name = '名字必填';
+  if (draft.content.trim() === '') errors.content = '正文必填';
+
+  const depth = readWorldInteger(draft.depth, 0, WORLD_DEPTH_MAX, '深度');
+  if (!depth.ok) errors.depth = depth.error;
+  const probability = readWorldInteger(draft.probability, 0, 100, '概率');
+  if (!probability.ok) errors.probability = probability.error;
+  const groupWeight = readWorldInteger(draft.groupWeight, 0, WORLD_GROUP_WEIGHT_MAX, '组权重');
+  if (!groupWeight.ok) errors.groupWeight = groupWeight.error;
+  const sticky = readWorldInteger(draft.sticky, 0, WORLD_STICKY_MAX, '粘性');
+  if (!sticky.ok) errors.sticky = sticky.error;
+  const cooldown = readWorldInteger(draft.cooldown, 0, WORLD_COOLDOWN_MAX, '冷却');
+  if (!cooldown.ok) errors.cooldown = cooldown.error;
+  const delay = readWorldInteger(draft.delay, 0, WORLD_DELAY_MAX, '延迟');
+  if (!delay.ok) errors.delay = delay.error;
+  const order = readWorldInteger(draft.order, null, null, '排序');
+  if (!order.ok) errors.order = order.error;
+
+  // 留空 = 用书级默认（null）；填了就必须是 1–20 的整数。
+  const scanText = draft.scanDepth.trim();
+  let scanDepth: number | null = null;
+  if (scanText !== '') {
+    const scan = readWorldInteger(scanText, 1, WORLD_SCAN_DEPTH_MAX, '扫描深度');
+    if (scan.ok) scanDepth = scan.value;
+    else errors.scanDepth = scan.error;
+  }
+
+  if (
+    !depth.ok ||
+    !probability.ok ||
+    !groupWeight.ok ||
+    !sticky.ok ||
+    !cooldown.ok ||
+    !delay.ok ||
+    !order.ok ||
+    Object.keys(errors).length > 0
+  ) {
+    return { ok: false, errors };
+  }
+
+  return {
+    ok: true,
+    entry: {
+      id: draft.id,
+      name,
+      keys: splitWorldKeys(draft.keys),
+      secondaryKeys: splitWorldKeys(draft.secondaryKeys),
+      content: draft.content,
+      enabled: draft.enabled,
+      constant: draft.constant,
+      selective: draft.selective,
+      selectiveLogic: draft.selectiveLogic,
+      order: order.value,
+      caseSensitive: draft.caseSensitive,
+      wholeWords: draft.wholeWords,
+      position: draft.position,
+      depth: depth.value,
+      role: draft.role,
+      probability: probability.value,
+      useProbability: draft.useProbability,
+      group: draft.group.trim(),
+      groupWeight: groupWeight.value,
+      sticky: sticky.value,
+      cooldown: cooldown.value,
+      delay: delay.value,
+      scanDepth,
+    },
+  };
+}
+
+/** 保存回执 → 列表行：正文不留在行里，字数按码点数（与后端 chars 同口径）。 */
+function toWorldEntrySummary(entry: WorldBookEntry): WorldBookEntrySummary {
+  return {
+    id: entry.id,
+    name: entry.name,
+    keys: entry.keys,
+    secondaryKeys: entry.secondaryKeys,
+    enabled: entry.enabled,
+    constant: entry.constant,
+    selective: entry.selective,
+    selectiveLogic: entry.selectiveLogic,
+    order: entry.order,
+    caseSensitive: entry.caseSensitive,
+    wholeWords: entry.wholeWords,
+    position: entry.position,
+    depth: entry.depth,
+    role: entry.role,
+    probability: entry.probability,
+    useProbability: entry.useProbability,
+    group: entry.group,
+    groupWeight: entry.groupWeight,
+    sticky: entry.sticky,
+    cooldown: entry.cooldown,
+    delay: entry.delay,
+    scanDepth: entry.scanDepth,
+    chars: Array.from(entry.content).length,
+  };
+}
+
 // 一层的 key 就是 scope + scopeId（global 的 scopeId 固定空串），与后端同一套定位方式。
 function entryAt(
   snapshot: PromptDefaultsSnapshot | null,
@@ -292,6 +521,15 @@ export default function PromptsPage() {
   const [worldBookMessage, setWorldBookMessage] = useState('');
   // before = 导入前这一层的条目数：契约里 replaced 可能只是布尔，兜底时要用它。
   const [worldBookResult, setWorldBookResult] = useState<{ result: WorldBookImportResult; before: number } | null>(null);
+  // 逐条编辑：列表只有摘要，正文要打开时现读一条；表单期间不重拉整表，免得冲掉没保存的改动。
+  const [worldBookEditId, setWorldBookEditId] = useState<number | null>(null);
+  const [worldBookDraft, setWorldBookDraft] = useState<WorldEntryDraft | null>(null);
+  const [worldBookEditLoading, setWorldBookEditLoading] = useState(false);
+  const [worldBookEditBusy, setWorldBookEditBusy] = useState(false);
+  const [worldBookEditError, setWorldBookEditError] = useState('');
+  const [worldBookEditFields, setWorldBookEditFields] = useState<WorldEntryFieldErrors>({});
+  // 换层 / 收起 / 再点另一行之后，先前发出的详情响应回来也不许再填回表单。
+  const worldBookEditEpoch = useRef(0);
 
   useEffect(() => {
     void loadItems();
@@ -954,6 +1192,7 @@ export default function PromptsPage() {
   }
 
   function selectWorldBookLayer(scope: Scope): void {
+    resetWorldBookEdit();
     setWorldBookScope(scope);
     setWorldBookError('');
     setWorldBookMessage('');
@@ -961,6 +1200,7 @@ export default function PromptsPage() {
   }
 
   function selectWorldBookTarget(value: string): void {
+    resetWorldBookEdit();
     setWorldBookTargetIds({ ...worldBookTargetIds, [worldBookScope]: value });
     setWorldBookError('');
     setWorldBookMessage('');
@@ -1006,6 +1246,8 @@ export default function PromptsPage() {
     try {
       const result = await importWorldBook({ scope: worldBookScope, scopeId: worldBookTargetId, book: source.book });
       setWorldBookResult({ result, before });
+      // 整层重导后旧条目 id 已作废，编辑区要收起。
+      resetWorldBookEdit();
       await loadWorldBooks();
     } catch (err) {
       setWorldBookError(describeWorldBookError(err));
@@ -1024,12 +1266,105 @@ export default function PromptsPage() {
     setWorldBookBusy(true);
     try {
       await deleteWorldBook({ scope: worldBookScope, scopeId: worldBookTargetId });
+      resetWorldBookEdit();
       await loadWorldBooks();
       setWorldBookMessage('已删除 ' + targetLabel + ' 这一层的世界书');
     } catch (err) {
       setWorldBookError(describeWorldBookError(err));
     } finally {
       setWorldBookBusy(false);
+    }
+  }
+
+  function resetWorldBookEdit(): void {
+    worldBookEditEpoch.current += 1;
+    setWorldBookEditId(null);
+    setWorldBookDraft(null);
+    setWorldBookEditLoading(false);
+    setWorldBookEditBusy(false);
+    setWorldBookEditError('');
+    setWorldBookEditFields({});
+  }
+
+  function closeWorldBookEdit(): void {
+    if (worldBookEditBusy) return;
+    resetWorldBookEdit();
+  }
+
+  // 点一行：读这一条的正文再铺成表单；点正在编辑的那行就收起。
+  async function openWorldBookEdit(item: WorldBookEntrySummary): Promise<void> {
+    if (worldBookEditBusy) return;
+    if (worldBookEditId === item.id && !worldBookEditLoading) {
+      resetWorldBookEdit();
+      return;
+    }
+    const scope = worldBookScope;
+    const scopeId = worldBookTargetId;
+    const epoch = worldBookEditEpoch.current + 1;
+    worldBookEditEpoch.current = epoch;
+    setWorldBookEditId(item.id);
+    setWorldBookDraft(null);
+    setWorldBookEditError('');
+    setWorldBookEditFields({});
+    setWorldBookEditLoading(true);
+    try {
+      const entry = await fetchWorldBookEntry(scope, scopeId, item.id);
+      if (worldBookEditEpoch.current !== epoch) return;
+      setWorldBookDraft(toWorldEntryDraft(entry));
+    } catch (err) {
+      if (worldBookEditEpoch.current !== epoch) return;
+      setWorldBookEditError(describeWorldBookEntryError(err));
+    } finally {
+      if (worldBookEditEpoch.current === epoch) setWorldBookEditLoading(false);
+    }
+  }
+
+  // 改一个字段就顺手消掉它的行内提示：别让已经改对的输入框一直红着。
+  function updateWorldBookDraft<K extends keyof WorldEntryDraft>(key: K, value: WorldEntryDraft[K]): void {
+    setWorldBookDraft((current) => (current === null ? current : { ...current, [key]: value }));
+    const field = key as WorldEntryFieldKey;
+    setWorldBookEditFields((current) => {
+      if (!(field in current)) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+  }
+
+  async function saveWorldBookEdit(): Promise<void> {
+    if (worldBookDraft === null || worldBookEditBusy) return;
+    const built = buildWorldEntry(worldBookDraft);
+    if (!built.ok) {
+      setWorldBookEditFields(built.errors);
+      setWorldBookEditError('');
+      return;
+    }
+    const scope = worldBookScope;
+    const scopeId = worldBookTargetId;
+    const rowId = worldBookDraft.id;
+    setWorldBookEditBusy(true);
+    setWorldBookEditError('');
+    setWorldBookEditFields({});
+    try {
+      const saved = await saveWorldBookEntry(scope, scopeId, built.entry);
+      const summary = toWorldEntrySummary(saved);
+      // 只换这一层这一行：不重拉整表，别的层和别的行都不动。
+      setWorldBooks((current) =>
+        current === null
+          ? current
+          : current.map((layer) =>
+              layer.scope === scope && layer.scopeId === scopeId
+                ? { ...layer, entries: layer.entries.map((item) => (item.id === rowId ? summary : item)) }
+                : layer,
+            ),
+      );
+      resetWorldBookEdit();
+      setWorldBookMessage('已保存「' + (summary.name === '' ? '无名条目' : summary.name) + '」');
+    } catch (err) {
+      // 失败只写表单：列表保持原样，用户还能改了重试。
+      setWorldBookEditError(describeWorldBookEntryError(err));
+    } finally {
+      setWorldBookEditBusy(false);
     }
   }
 
@@ -1094,21 +1429,354 @@ export default function PromptsPage() {
                 <th>关键词</th>
                 <th>类型</th>
                 <th>字数</th>
+                <th className="worldbook-op">操作</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((item) => (
-                <tr key={item.id} className={item.enabled ? 'worldbook-row' : 'worldbook-row off'}>
+                <tr
+                  key={item.id}
+                  className={
+                    (item.enabled ? 'worldbook-row' : 'worldbook-row off') +
+                    (worldBookEditId === item.id ? ' editing' : '')
+                  }
+                >
                   <td className="worldbook-name">{item.name === '' ? '（无名条目）' : item.name}</td>
                   <td className="worldbook-keys">{describeWorldBookKeys(item)}</td>
                   <td>{item.enabled ? (item.constant ? '常驻' : '普通') : '停用'}</td>
                   <td className="worldbook-chars">{formatNumber(item.chars)}</td>
+                  <td className="worldbook-op">
+                    <button
+                      type="button"
+                      className="link small"
+                      disabled={worldBookEditBusy}
+                      onClick={() => void openWorldBookEdit(item)}
+                    >
+                      {worldBookEditId === item.id ? '收起' : '编辑'}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {renderWorldBookEditor()}
       </div>
+    );
+  }
+
+  // 逐条编辑区：同页展开，不弹窗。字段顺序按契约分组：基本 / 关键词 / 触发 / 排序。
+  function renderWorldBookEditor(): ReactElement | null {
+    if (worldBookEditId === null) return null;
+    const draft = worldBookDraft;
+    const title = draft === null ? '条目 #' + String(worldBookEditId) : draft.name.trim() === '' ? '（无名条目）' : draft.name;
+    const head = (
+      <div className="worldbook-editor-head">
+        <h3>编辑条目 · {title}</h3>
+        <button type="button" className="ghost small" disabled={worldBookEditBusy} onClick={closeWorldBookEdit}>
+          收起
+        </button>
+      </div>
+    );
+    if (worldBookEditLoading) {
+      return (
+        <div className="worldbook-editor">
+          {head}
+          <p className="hint">正在读取条目正文…</p>
+        </div>
+      );
+    }
+    if (draft === null) {
+      return (
+        <div className="worldbook-editor">
+          {head}
+          {worldBookEditError === '' ? null : <p className="error">{worldBookEditError}</p>}
+          <p className="hint">没读到这条的正文，收起后重新点「编辑」；列表里的摘要没动。</p>
+        </div>
+      );
+    }
+    const fieldError = (key: WorldEntryFieldKey): ReactElement | null =>
+      worldBookEditFields[key] === undefined ? null : <span className="field-error">{worldBookEditFields[key]}</span>;
+    // 深度只在 @D 时参与装配，其它位置锁住免得用户以为它生效了。
+    const depthLocked = draft.position !== 'atDepth';
+    return (
+      <form
+        className="worldbook-editor"
+        noValidate
+        onSubmit={(event) => {
+          event.preventDefault();
+          void saveWorldBookEdit();
+        }}
+      >
+        {head}
+        <div className="worldbook-editor-group">
+          <h4>基本</h4>
+          <label className="field">
+            <span>名字</span>
+            <input
+              type="text"
+              value={draft.name}
+              disabled={worldBookEditBusy}
+              onChange={(event) => updateWorldBookDraft('name', event.target.value)}
+            />
+            {fieldError('name')}
+          </label>
+          <label className="field">
+            <span>正文</span>
+            <textarea
+              rows={6}
+              value={draft.content}
+              disabled={worldBookEditBusy}
+              onChange={(event) => updateWorldBookDraft('content', event.target.value)}
+            />
+            {fieldError('content')}
+          </label>
+          <label className="row checkbox">
+            <input
+              type="checkbox"
+              checked={draft.enabled}
+              disabled={worldBookEditBusy}
+              onChange={(event) => updateWorldBookDraft('enabled', event.target.checked)}
+            />
+            <span>启用这条（关掉后内容留在库里，但不参与装配）</span>
+          </label>
+          <label className="row checkbox">
+            <input
+              type="checkbox"
+              checked={draft.constant}
+              disabled={worldBookEditBusy}
+              onChange={(event) => updateWorldBookDraft('constant', event.target.checked)}
+            />
+            <span>常驻（constant，不靠关键词命中）</span>
+          </label>
+        </div>
+        <div className="worldbook-editor-group">
+          <h4>关键词</h4>
+          <div className="row">
+            <label className="field">
+              <span>主关键词（逗号或换行分隔）</span>
+              <input
+                type="text"
+                value={draft.keys}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('keys', event.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>次关键词（逗号或换行分隔）</span>
+              <input
+                type="text"
+                value={draft.secondaryKeys}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('secondaryKeys', event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="row worldbook-editor-flags">
+            <label className="row checkbox">
+              <input
+                type="checkbox"
+                checked={draft.caseSensitive}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('caseSensitive', event.target.checked)}
+              />
+              <span>区分大小写</span>
+            </label>
+            <label className="row checkbox">
+              <input
+                type="checkbox"
+                checked={draft.wholeWords}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('wholeWords', event.target.checked)}
+              />
+              <span>只匹配整词</span>
+            </label>
+            <label className="row checkbox">
+              <input
+                type="checkbox"
+                checked={draft.selective}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('selective', event.target.checked)}
+              />
+              <span>启用次关键词</span>
+            </label>
+          </div>
+          <label className="field">
+            <span>次关键词逻辑</span>
+            <select
+              value={draft.selectiveLogic}
+              disabled={worldBookEditBusy}
+              onChange={(event) => updateWorldBookDraft('selectiveLogic', event.target.value as WorldSelectiveLogic)}
+            >
+              {WORLD_SELECTIVE_LOGICS.map((logic) => (
+                <option key={logic} value={logic}>
+                  {WORLD_SELECTIVE_LOGIC_LABELS[logic]}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="worldbook-editor-group">
+          <h4>触发</h4>
+          <div className="row">
+            <label className="field">
+              <span>插入位置</span>
+              <select
+                value={draft.position}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('position', event.target.value as WorldPosition)}
+              >
+                {WORLD_POSITIONS.map((position) => (
+                  <option key={position} value={position}>
+                    {WORLD_POSITION_LABELS[position]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>深度（仅 @D 生效，0–{String(WORLD_DEPTH_MAX)}）</span>
+              <input
+                type="number"
+                step={1}
+                value={draft.depth}
+                disabled={worldBookEditBusy || depthLocked}
+                onChange={(event) => updateWorldBookDraft('depth', event.target.value)}
+              />
+              {fieldError('depth')}
+            </label>
+            <label className="field">
+              <span>角色（role）</span>
+              <select
+                value={draft.role}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('role', event.target.value as WorldEntryRole)}
+              >
+                {WORLD_ENTRY_ROLES.map((role) => (
+                  <option key={role} value={role}>
+                    {WORLD_ENTRY_ROLE_LABELS[role]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="row">
+            <label className="field">
+              <span>概率（0–100）</span>
+              <input
+                type="number"
+                step={1}
+                value={draft.probability}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('probability', event.target.value)}
+              />
+              {fieldError('probability')}
+            </label>
+            <label className="row checkbox">
+              <input
+                type="checkbox"
+                checked={draft.useProbability}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('useProbability', event.target.checked)}
+              />
+              <span>按概率触发（useProbability）</span>
+            </label>
+          </div>
+          <div className="row">
+            <label className="field">
+              <span>分组（group）</span>
+              <input
+                type="text"
+                value={draft.group}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('group', event.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>组权重（0–{String(WORLD_GROUP_WEIGHT_MAX)}）</span>
+              <input
+                type="number"
+                step={1}
+                value={draft.groupWeight}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('groupWeight', event.target.value)}
+              />
+              {fieldError('groupWeight')}
+            </label>
+          </div>
+          <div className="row">
+            <label className="field">
+              <span>粘性 sticky（0–{String(WORLD_STICKY_MAX)}）</span>
+              <input
+                type="number"
+                step={1}
+                value={draft.sticky}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('sticky', event.target.value)}
+              />
+              {fieldError('sticky')}
+            </label>
+            <label className="field">
+              <span>冷却 cooldown（0–{String(WORLD_COOLDOWN_MAX)}）</span>
+              <input
+                type="number"
+                step={1}
+                value={draft.cooldown}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('cooldown', event.target.value)}
+              />
+              {fieldError('cooldown')}
+            </label>
+            <label className="field">
+              <span>延迟 delay（0–{String(WORLD_DELAY_MAX)}）</span>
+              <input
+                type="number"
+                step={1}
+                value={draft.delay}
+                disabled={worldBookEditBusy}
+                onChange={(event) => updateWorldBookDraft('delay', event.target.value)}
+              />
+              {fieldError('delay')}
+            </label>
+          </div>
+          <label className="field">
+            <span>
+              扫描深度（1–{String(WORLD_SCAN_DEPTH_MAX)}，留空 = 用书级默认 {String(WORLD_SCAN_DEPTH_DEFAULT)}）
+            </span>
+            <input
+              type="number"
+              step={1}
+              value={draft.scanDepth}
+              placeholder={'书级默认 ' + String(WORLD_SCAN_DEPTH_DEFAULT)}
+              disabled={worldBookEditBusy}
+              onChange={(event) => updateWorldBookDraft('scanDepth', event.target.value)}
+            />
+            {fieldError('scanDepth')}
+          </label>
+        </div>
+        <div className="worldbook-editor-group">
+          <h4>排序</h4>
+          <label className="field">
+            <span>order（同位置内按它排，越小越靠前）</span>
+            <input
+              type="number"
+              step={1}
+              value={draft.order}
+              disabled={worldBookEditBusy}
+              onChange={(event) => updateWorldBookDraft('order', event.target.value)}
+            />
+            {fieldError('order')}
+          </label>
+        </div>
+        {worldBookEditError === '' ? null : <p className="error">{worldBookEditError}</p>}
+        <div className="actions">
+          <button type="submit" className="primary" disabled={worldBookEditBusy}>
+            {worldBookEditBusy ? '保存中…' : '保存'}
+          </button>
+          <button type="button" className="ghost" disabled={worldBookEditBusy} onClick={closeWorldBookEdit}>
+            取消
+          </button>
+        </div>
+      </form>
     );
   }
 

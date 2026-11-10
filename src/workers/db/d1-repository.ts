@@ -24,7 +24,15 @@ import type {
 import { isRevealSteps } from '../../core/chat/reply-view';
 import { isPromptDefaultKey } from '../../core/prompt/defaults';
 import { isInjectionDepth, isInjectionRole, type PromptInjectionStore } from '../../core/prompt/injection';
-import type { WorldBook, WorldBookRecord, WorldBookStore, WorldEntry } from '../../core/prompt/worldbook';
+import {
+  normalizeWorldBook,
+  type WorldBook,
+  type WorldBookRecord,
+  type WorldBookStateStore,
+  type WorldBookStore,
+  type WorldEntry,
+  type WorldEntryState,
+} from '../../core/prompt/worldbook';
 import { VOICE_DIRECTOR_OFF, VOICE_SPEED_DEFAULT, isVoiceDirector, isVoiceMode, isVoiceSpeed } from '../../core/voice/settings';
 import type {
   BodyEmojiGuideConfig,
@@ -361,6 +369,12 @@ interface WorldBookRow {
   imported_at: string;
 }
 
+interface WorldBookStateRow {
+  entry_id: number;
+  sticky_until: number;
+  cooldown_until: number;
+}
+
 /**
  * 行 -> 世界书：scope 不认识、book_json 解析不了、或形状不是本进程认的那一版，
  * 都当这一行不存在——一本坏书只能让这一层落回上一层，不能让整轮回复 500。
@@ -374,13 +388,16 @@ function toWorldBookRecord(row: WorldBookRow): WorldBookRecord | null {
     return null;
   }
   if (!isWorldBook(parsed)) return null;
+  // 闸门只管「读侧真的会碰」的那几个字段在不在；新字段之前的书缺 position/sticky/scanDepth 之类，
+  // 到这里补成当前版本的默认值，上层拿到的书就永远是这一版形状
+  const normalized = normalizeWorldBook(parsed);
   return {
     scope: row.scope,
     scopeId: row.scope_id,
-    name: typeof row.name === 'string' ? row.name : parsed.name,
-    book: parsed,
+    name: typeof row.name === 'string' ? row.name : normalized.name,
+    book: normalized,
     // 列只是导入时的缓存：书里条数才是这份 JSON 的真相，两者不一致时信 JSON
-    entryCount: parsed.entries.length,
+    entryCount: normalized.entries.length,
     importedAt: row.imported_at,
   };
 }
@@ -705,6 +722,7 @@ export function createRepositories(
   emojiAliases: EmojiAliasStore;
   promptInjections: PromptInjectionStore;
   worldBooks: WorldBookStore;
+  worldBookState: WorldBookStateStore;
 } {
   const prompts: PromptRepository = {
     // 行和段两边都空才是「这一层没有提示词」；只剩行（段被清空）仍算有配置，与 PUT 的容器语义一致
@@ -1045,7 +1063,12 @@ export function createRepositories(
     },
 
     async clear(key: { guildId: string; channelId: string }): Promise<void> {
-      await db.prepare('DELETE FROM messages WHERE guild_id = ? AND channel_id = ?').bind(key.guildId, key.channelId).run();
+      // 清空频道 = 对话从头开始数轮次，世界书的粘性/冷却记账也得跟着失效；
+      // 否则下一轮会按不存在的历史算粘性。两条同一批里删，不留「消息没了、记账还在」的半成品。
+      await db.batch([
+        db.prepare('DELETE FROM messages WHERE guild_id = ? AND channel_id = ?').bind(key.guildId, key.channelId),
+        db.prepare('DELETE FROM world_book_state WHERE guild_id = ? AND channel_id = ?').bind(key.guildId, key.channelId),
+      ]);
     },
 
     // §62：后台「历史」页的单条删除走这三条 —— 先按 id 取（拿正文/作者/落库时刻去对 Discord 那条），再删行。
@@ -1645,6 +1668,54 @@ export function createRepositories(
     },
   };
 
+  // 粘性/冷却记账：按 (guild, channel, entry) 一张薄表，服务端每轮整份覆盖写
+  const worldBookState: WorldBookStateStore = {
+    async load(guildId: string, channelId: string): Promise<WorldEntryState[]> {
+      // 固定按 entry_id 升序：同一条书的两份账读回来顺序一致，上层比对不会因顺序抖动而重写
+      const { results } = await db
+        .prepare(
+          'SELECT entry_id, sticky_until, cooldown_until FROM world_book_state WHERE guild_id = ? AND channel_id = ? ORDER BY entry_id ASC',
+        )
+        .bind(guildId, channelId)
+        .all<WorldBookStateRow>();
+      const out: WorldEntryState[] = [];
+      for (const row of results ?? []) {
+        // 列上是 INTEGER NOT NULL：脏到不是有限数就当这条没记过，一条坏行不该废掉整份记账
+        const entryId = Number(row.entry_id);
+        if (!Number.isFinite(entryId)) continue;
+        const stickyUntil = Number(row.sticky_until);
+        const cooldownUntil = Number(row.cooldown_until);
+        out.push({
+          entryId,
+          stickyUntil: Number.isFinite(stickyUntil) ? stickyUntil : 0,
+          cooldownUntil: Number.isFinite(cooldownUntil) ? cooldownUntil : 0,
+        });
+      }
+      return out;
+    },
+
+    async save(guildId: string, channelId: string, rows: readonly WorldEntryState[]): Promise<void> {
+      // 整份替换（与 timeoutSettings.put 同形）：调用方给的就是最终状态，上一版多出来的条目一条不留。
+      // 空数组只剩这条 DELETE —— 状态清空时多发 INSERT 等于把旧记账又写回去。
+      const updatedAt = nowIso();
+      const statements = [
+        db.prepare('DELETE FROM world_book_state WHERE guild_id = ? AND channel_id = ?').bind(guildId, channelId),
+      ];
+      for (const row of rows) {
+        if (!Number.isFinite(row.entryId)) continue;
+        statements.push(
+          db
+            .prepare(
+              'INSERT INTO world_book_state (guild_id, channel_id, entry_id, sticky_until, cooldown_until, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+            )
+            .bind(guildId, channelId, row.entryId, row.stickyUntil, row.cooldownUntil, updatedAt),
+        );
+      }
+      // 一批一个事务：DELETE 和 INSERT 不会只成一半
+      await db.batch(statements);
+    },
+  };
+
   const emojiDescriptions: EmojiDescriptionStore = {
     async list(guildId: string): Promise<EmojiDescription[]> {
       // 显式列名：guild_id 只当过滤条件，回来后上层用不到；排序钉在 emoji_id 升序，网关合并清单时顺序稳定
@@ -1962,5 +2033,6 @@ export function createRepositories(
     emojiAliases,
     promptInjections,
     worldBooks,
+    worldBookState,
   };
 }

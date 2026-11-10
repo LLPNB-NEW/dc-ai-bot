@@ -1,15 +1,28 @@
 import { describe, expect, it } from 'vitest';
-import type { ScopedKey } from '../src/core/types';
+import type { ChatMessage, ScopedKey } from '../src/core/types';
 import {
   buildWorldBlock,
   parseWorldBook,
+  readWorldPosition,
+  readWorldRole,
   resolveWorldBook,
   selectWorldEntries,
+  withWorldDepth,
   WORLD_BLOCK_MAX_CHARS,
+  WORLD_DEPTH_MAX,
+  WORLD_GROUP_WEIGHT_DEFAULT,
+  WORLD_POSITIONS,
+  WORLD_PROBABILITY_DEFAULT,
   WORLD_SCAN_DEPTH_DEFAULT,
   WORLD_SCAN_DEPTH_MAX,
 } from '../src/core/prompt/worldbook';
-import type { WorldBook, WorldBookRecord, WorldEntry } from '../src/core/prompt/worldbook';
+import type {
+  WorldBook,
+  WorldBookRecord,
+  WorldEntry,
+  WorldEntryState,
+  WorldSelection,
+} from '../src/core/prompt/worldbook';
 
 function parseOk(raw: unknown): WorldBook {
   const result = parseWorldBook(raw);
@@ -38,8 +51,38 @@ function entry(overrides: Partial<WorldEntry> = {}): WorldEntry {
     order: 100,
     caseSensitive: false,
     wholeWords: false,
+    position: 'anTop',
+    depth: 4,
+    role: 'system',
+    probability: 100,
+    useProbability: true,
+    group: '',
+    groupWeight: 100,
+    sticky: 0,
+    cooldown: 0,
+    delay: 0,
+    scanDepth: null,
     ...overrides,
   };
+}
+
+/** 选择结果只关心条目本身：这里把 WorldSelection 拆成数组，断言与旧版一一对应 */
+function pick(
+  value: WorldBook,
+  messages: readonly { role: string; content: string }[],
+  scanDepth?: number,
+  options: { state?: WorldEntryState[]; turn?: number; random?: () => number } = {},
+): WorldEntry[] {
+  return selectWorldEntries(value, messages, { ...options, ...(scanDepth === undefined ? {} : { scanDepth }) }).entries;
+}
+
+/** 要看 skipped / state / byPosition 的用例走这里：pick 只把 entries 摊平 */
+function select(
+  value: WorldBook,
+  messages: readonly { role: string; content: string }[],
+  options: { scanDepth?: number; state?: readonly WorldEntryState[]; turn?: number; random?: () => number } = {},
+): WorldSelection {
+  return selectWorldEntries(value, messages, options);
 }
 
 function book(entries: WorldEntry[]): WorldBook {
@@ -102,6 +145,18 @@ describe('parseWorldBook 三种输入形态', () => {
         order: 30,
         caseSensitive: true,
         wholeWords: true,
+        // 新契约：老导出没这些字段，全部落到「不改旧行为」的缺省值
+        position: 'anTop',
+        depth: WORLD_SCAN_DEPTH_DEFAULT,
+        role: 'system',
+        probability: WORLD_PROBABILITY_DEFAULT,
+        useProbability: false,
+        group: '',
+        groupWeight: WORLD_GROUP_WEIGHT_DEFAULT,
+        sticky: 0,
+        cooldown: 0,
+        delay: 0,
+        scanDepth: null,
       },
       {
         id: 7,
@@ -116,6 +171,17 @@ describe('parseWorldBook 三种输入形态', () => {
         order: 100,
         caseSensitive: false,
         wholeWords: false,
+        position: 'anTop',
+        depth: WORLD_SCAN_DEPTH_DEFAULT,
+        role: 'system',
+        probability: WORLD_PROBABILITY_DEFAULT,
+        useProbability: false,
+        group: '',
+        groupWeight: WORLD_GROUP_WEIGHT_DEFAULT,
+        sticky: 0,
+        cooldown: 0,
+        delay: 0,
+        scanDepth: null,
       },
     ]);
   });
@@ -230,8 +296,8 @@ describe('parseWorldBook 跳过与提醒', () => {
     expect(value.entries.map((item) => item.content)).toEqual(['龙住在山里。']);
     expect(value.ignored).toEqual([{ identifier: '0', name: '条目 0', reason: 'disabled' }]);
     // 空窗口也要为空：constant 停用后不能再靠「每轮必插」混进来
-    expect(selectWorldEntries(value, [])).toEqual([]);
-    expect(selectWorldEntries(value, [message('龙')]).map((item) => item.content)).toEqual(['龙住在山里。']);
+    expect(pick(value, [])).toEqual([]);
+    expect(pick(value, [message('龙')]).map((item) => item.content)).toEqual(['龙住在山里。']);
   });
 });
 
@@ -327,32 +393,141 @@ describe('parseWorldBook 字段兼容', () => {
   });
 });
 
+describe('parseWorldBook 触发字段', () => {
+  it('position 数字 0..4 一一对应，缺省与越界值落 anTop', () => {
+    const value = parseOk({
+      entries: [
+        { keys: ['甲'], content: '1', position: 0 },
+        { keys: ['乙'], content: '2', position: 1 },
+        { keys: ['丙'], content: '3', position: 2 },
+        { keys: ['丁'], content: '4', position: 3 },
+        { keys: ['戊'], content: '5', position: 4 },
+        { keys: ['己'], content: '6' },
+        { keys: ['庚'], content: '7', position: 9 },
+      ],
+    });
+
+    expect(value.entries.map((item) => item.position)).toEqual([
+      'beforeChar',
+      'afterChar',
+      'anTop',
+      'anBottom',
+      'atDepth',
+      'anTop',
+      'anTop',
+    ]);
+    expect(WORLD_POSITIONS).toEqual(['beforeChar', 'afterChar', 'anTop', 'anBottom', 'atDepth']);
+  });
+
+  it('readWorldPosition 认字符串写法：大小写、空格、下划线都不计较', () => {
+    expect(readWorldPosition('beforeChar')).toBe('beforeChar');
+    expect(readWorldPosition('After Char')).toBe('afterChar');
+    expect(readWorldPosition('AN_TOP')).toBe('anTop');
+    expect(readWorldPosition('an-bottom')).toBe('anBottom');
+    expect(readWorldPosition('at_depth')).toBe('atDepth');
+    expect(readWorldPosition('0')).toBe('beforeChar');
+    expect(readWorldPosition(undefined)).toBe('anTop');
+    expect(readWorldPosition('乱写')).toBe('anTop');
+  });
+
+  it('depth / role / probability 缺省与显式值，越界按上下限夹住', () => {
+    const value = parseOk({
+      entries: [
+        { keys: ['甲'], content: '1' },
+        { keys: ['乙'], content: '2', depth: 0, role: 0, probability: 0 },
+        { keys: ['丙'], content: '3', depth: 60, role: 2, probability: 40 },
+        { keys: ['丁'], content: '4', role: 1, probability: 150 },
+        { keys: ['戊'], content: '5', depth: -1, probability: -1 },
+      ],
+    });
+
+    expect(value.entries.map((item) => item.depth)).toEqual([4, 0, WORLD_DEPTH_MAX, 4, 0]);
+    expect(value.entries.map((item) => item.role)).toEqual(['system', 'system', 'assistant', 'user', 'system']);
+    expect(value.entries.map((item) => item.probability)).toEqual([WORLD_PROBABILITY_DEFAULT, 0, 40, 100, 0]);
+  });
+
+  it('readWorldRole 数字码 0/1/2 与字符串都认，写错按 system', () => {
+    expect(readWorldRole(0)).toBe('system');
+    expect(readWorldRole(1)).toBe('user');
+    expect(readWorldRole(2)).toBe('assistant');
+    expect(readWorldRole('USER')).toBe('user');
+    expect(readWorldRole('assistant')).toBe('assistant');
+    expect(readWorldRole(7)).toBe('system');
+    expect(readWorldRole(undefined)).toBe('system');
+  });
+
+  it('useProbability 缺省按 probability<100 推导，显式值照抄', () => {
+    const value = parseOk({
+      entries: [
+        { keys: ['甲'], content: '1' },
+        { keys: ['乙'], content: '2', probability: 40 },
+        { keys: ['丙'], content: '3', probability: 40, useProbability: false },
+        { keys: ['丁'], content: '4', useProbability: true },
+        { keys: ['戊'], content: '5', use_probability: 0 },
+      ],
+    });
+
+    expect(value.entries.map((item) => item.useProbability)).toEqual([false, true, false, true, false]);
+  });
+
+  it('group 去首尾空格、缺省空串；groupWeight 缺省 100 并夹在 0..100000', () => {
+    const value = parseOk({
+      entries: [
+        { keys: ['甲'], content: '1' },
+        { keys: ['乙'], content: '2', group: '  龙组  ', groupWeight: 300 },
+        { keys: ['丙'], content: '3', group_weight: 50 },
+        { keys: ['丁'], content: '4', group: '   ', groupWeight: -1 },
+      ],
+    });
+
+    expect(value.entries.map((item) => item.group)).toEqual(['', '龙组', '', '']);
+    expect(value.entries.map((item) => item.groupWeight)).toEqual([WORLD_GROUP_WEIGHT_DEFAULT, 300, 50, 0]);
+  });
+
+  it('sticky / cooldown / delay 缺省 0；scanDepth 缺省 null，显式值夹到 1..20', () => {
+    const value = parseOk({
+      entries: [
+        { keys: ['甲'], content: '1' },
+        { keys: ['乙'], content: '2', sticky: 3, cooldown: 2, delay: 5, scanDepth: 7 },
+        { keys: ['丙'], content: '3', sticky: -1, cooldown: -2, delay: -3, scanDepth: 0 },
+        { keys: ['丁'], content: '4', scan_depth: 30 },
+        { keys: ['戊'], content: '5', scanDepth: null },
+      ],
+    });
+
+    expect(value.entries.map((item) => item.sticky)).toEqual([0, 3, 0, 0, 0]);
+    expect(value.entries.map((item) => item.cooldown)).toEqual([0, 2, 0, 0, 0]);
+    expect(value.entries.map((item) => item.delay)).toEqual([0, 5, 0, 0, 0]);
+    expect(value.entries.map((item) => item.scanDepth)).toEqual([null, 7, 1, WORLD_SCAN_DEPTH_MAX, null]);
+  });
+});
+
 describe('selectWorldEntries 触发', () => {
   it('constant 条目每轮必插，不看关键词', () => {
     const target = book([entry({ constant: true, content: '这个世界有灵气。' })]);
-    expect(selectWorldEntries(target, [message('完全无关')])).toHaveLength(1);
+    expect(pick(target, [message('完全无关')])).toHaveLength(1);
   });
 
   it('keys 任一命中即算命中', () => {
     const target = book([entry({ keys: ['龙', '凤'] })]);
-    expect(selectWorldEntries(target, [message('天上飞的凤')])).toHaveLength(1);
-    expect(selectWorldEntries(target, [message('地上跑的狗')])).toHaveLength(0);
+    expect(pick(target, [message('天上飞的凤')])).toHaveLength(1);
+    expect(pick(target, [message('地上跑的狗')])).toHaveLength(0);
   });
 
   it('大小写不敏感；条目开了 caseSensitive 才区分', () => {
     const loose = book([entry({ keys: ['Dragon'] })]);
-    expect(selectWorldEntries(loose, [message('a dragon here')])).toHaveLength(1);
+    expect(pick(loose, [message('a dragon here')])).toHaveLength(1);
 
     const strict = book([entry({ keys: ['Dragon'], caseSensitive: true })]);
-    expect(selectWorldEntries(strict, [message('a dragon here')])).toHaveLength(0);
-    expect(selectWorldEntries(strict, [message('a Dragon here')])).toHaveLength(1);
+    expect(pick(strict, [message('a dragon here')])).toHaveLength(0);
+    expect(pick(strict, [message('a Dragon here')])).toHaveLength(1);
   });
 
   it('wholeWords 只认词边界', () => {
     const target = book([entry({ keys: ['cat'], wholeWords: true })]);
-    expect(selectWorldEntries(target, [message('concatenate')])).toHaveLength(0);
-    expect(selectWorldEntries(target, [message('a cat, here')])).toHaveLength(1);
-    expect(selectWorldEntries(target, [message('cat')])).toHaveLength(1);
+    expect(pick(target, [message('concatenate')])).toHaveLength(0);
+    expect(pick(target, [message('a cat, here')])).toHaveLength(1);
+    expect(pick(target, [message('cat')])).toHaveLength(1);
   });
 
   it('扫描窗口只看末尾 scanDepth 条，缺省 4 条', () => {
@@ -360,25 +535,25 @@ describe('selectWorldEntries 触发', () => {
     const far = [message('龙'), message('无关'), message('无关'), message('无关'), message('无关')];
     expect(far).toHaveLength(5);
     expect(WORLD_SCAN_DEPTH_DEFAULT).toBe(4);
-    expect(selectWorldEntries(target, far)).toHaveLength(0);
+    expect(pick(target, far)).toHaveLength(0);
     // 同一句话挪进窗口就命中：判的是位置，不是内容
-    expect(selectWorldEntries(target, [...far.slice(1), message('龙')])).toHaveLength(1);
-    expect(selectWorldEntries(target, far, 5)).toHaveLength(1);
+    expect(pick(target, [...far.slice(1), message('龙')])).toHaveLength(1);
+    expect(pick(target, far, 5)).toHaveLength(1);
   });
 
   it('scanDepth 被夹到 1..20', () => {
     const target = book([entry({ keys: ['龙'] })]);
     const pair = [message('龙'), message('无关')];
-    expect(selectWorldEntries(target, pair, 0)).toHaveLength(0);
-    expect(selectWorldEntries(target, pair, -3)).toHaveLength(0);
-    expect(selectWorldEntries(target, pair, 2)).toHaveLength(1);
+    expect(pick(target, pair, 0)).toHaveLength(0);
+    expect(pick(target, pair, -3)).toHaveLength(0);
+    expect(pick(target, pair, 2)).toHaveLength(1);
 
     const long = [message('无关'), message('无关'), message('无关'), message('无关'), message('龙')];
     for (let index = 5; index < 25; index += 1) long.push(message('无关'));
     expect(long).toHaveLength(25);
     expect(WORLD_SCAN_DEPTH_MAX).toBe(20);
     // 第 5 条要 21 条窗口才够得着；上限 20 把它挡在窗口外
-    expect(selectWorldEntries(target, long, 21)).toHaveLength(0);
+    expect(pick(target, long, 21)).toHaveLength(0);
   });
 
   it('四种 selectiveLogic 按窗口里的 secondary 判定', () => {
@@ -392,15 +567,15 @@ describe('selectWorldEntries 触发', () => {
       const target = book([
         entry({ keys: ['龙'], selective: true, secondaryKeys: ['甲', '乙'], selectiveLogic: item.logic }),
       ]);
-      expect(selectWorldEntries(target, [message('龙 甲 乙')])).toHaveLength(item.all ? 1 : 0);
-      expect(selectWorldEntries(target, [message('龙 甲')])).toHaveLength(item.some ? 1 : 0);
-      expect(selectWorldEntries(target, [message('龙')])).toHaveLength(item.none ? 1 : 0);
+      expect(pick(target, [message('龙 甲 乙')])).toHaveLength(item.all ? 1 : 0);
+      expect(pick(target, [message('龙 甲')])).toHaveLength(item.some ? 1 : 0);
+      expect(pick(target, [message('龙')])).toHaveLength(item.none ? 1 : 0);
     }
   });
 
   it('selective 但没 secondaryKeys 时只看主关键词', () => {
     const target = book([entry({ keys: ['龙'], selective: true, selectiveLogic: 'andAll' })]);
-    expect(selectWorldEntries(target, [message('龙')])).toHaveLength(1);
+    expect(pick(target, [message('龙')])).toHaveLength(1);
   });
 });
 
@@ -411,7 +586,7 @@ describe('selectWorldEntries 排序与预算', () => {
       entry({ id: 9, order: 10, constant: true, content: 'b' }),
       entry({ id: 2, order: 10, constant: true, content: 'a' }),
     ]);
-    const picked = selectWorldEntries(target, [message('无关')]);
+    const picked = pick(target, [message('无关')]);
     expect(picked.map((item) => item.id)).toEqual([2, 9, 3]);
     expect(target.entries.map((item) => item.id)).toEqual([3, 9, 2]);
   });
@@ -422,7 +597,7 @@ describe('selectWorldEntries 排序与预算', () => {
       entry({ id: 0, constant: true, content: big }),
       entry({ id: 1, constant: true, content: big }),
     ]);
-    const picked = selectWorldEntries(target, [message('无关')]);
+    const picked = pick(target, [message('无关')]);
     expect(picked.map((item) => item.id)).toEqual([0]);
     expect(picked[0]?.content).toHaveLength(3000);
     expect(WORLD_BLOCK_MAX_CHARS).toBe(4000);
@@ -436,13 +611,251 @@ describe('selectWorldEntries 排序与预算', () => {
       entry({ id: 1, constant: true, content: second }),
       entry({ id: 2, constant: true, content: 'z' }),
     ]);
-    const picked = selectWorldEntries(target, [message('无关')]);
+    const picked = pick(target, [message('无关')]);
     expect(picked.map((item) => item.id)).toEqual([0, 1]);
   });
 
   it('单条正文超过 4000 也不收', () => {
     const target = book([entry({ constant: true, content: 'x'.repeat(4001) })]);
-    expect(selectWorldEntries(target, [message('无关')])).toHaveLength(0);
+    expect(pick(target, [message('无关')])).toHaveLength(0);
+  });
+});
+
+describe('selectWorldEntries 概率', () => {
+  it('probability=100 不掷骰：random 一次都不调用', () => {
+    let rolls = 0;
+    const target = book([entry({ keys: ['龙'] })]);
+    const random = (): number => {
+      rolls += 1;
+      return 0;
+    };
+    expect(pick(target, [message('龙')], undefined, { random })).toHaveLength(1);
+    expect(rolls).toBe(0);
+  });
+
+  it('useProbability=false 时 40% 也必中，同样不掷骰', () => {
+    let rolls = 0;
+    const target = book([entry({ keys: ['龙'], probability: 40, useProbability: false })]);
+    const random = (): number => {
+      rolls += 1;
+      return 0.99;
+    };
+    expect(pick(target, [message('龙')], undefined, { random })).toHaveLength(1);
+    expect(rolls).toBe(0);
+  });
+
+  it('random()*100 与 probability 比较：39 中、40 不中', () => {
+    const target = book([entry({ keys: ['龙'], probability: 40 })]);
+    expect(pick(target, [message('龙')], undefined, { random: () => 0.39 })).toHaveLength(1);
+    expect(pick(target, [message('龙')], undefined, { random: () => 0.4 })).toHaveLength(0);
+  });
+
+  it('probability=0 必不中，且 skipped 记 probability', () => {
+    const target = book([entry({ keys: ['龙'], probability: 0 })]);
+    const result = select(target, [message('龙')]);
+    expect(result.entries).toEqual([]);
+    expect(result.skipped).toEqual([{ id: 0, name: '条目', reason: 'probability' }]);
+  });
+});
+
+describe('selectWorldEntries 包含组', () => {
+  it('同组三条只活 groupWeight 最大的，其余记 group', () => {
+    const target = book([
+      entry({ id: 0, name: '一百', group: '龙组', groupWeight: 100, constant: true }),
+      entry({ id: 1, name: '三百', group: '龙组', groupWeight: 300, constant: true }),
+      entry({ id: 2, name: '二百', group: '龙组', groupWeight: 200, constant: true }),
+    ]);
+
+    const result = select(target, [message('无关')]);
+    expect(result.entries.map((item) => item.id)).toEqual([1]);
+    // 权重降序排完，输家按 200、100 的顺序落进 skipped
+    expect(result.skipped.map((item) => item.id)).toEqual([2, 0]);
+    expect(result.skipped.every((item) => item.reason === 'group')).toBe(true);
+  });
+
+  it('权重并列取 order 小的，order 也并列取 id 小的', () => {
+    const byOrder = book([
+      entry({ id: 2, group: '龙组', groupWeight: 100, order: 50, constant: true }),
+      entry({ id: 9, group: '龙组', groupWeight: 100, order: 10, constant: true }),
+    ]);
+    expect(select(byOrder, [message('无关')]).entries.map((item) => item.id)).toEqual([9]);
+
+    const byId = book([
+      entry({ id: 5, group: '龙组', groupWeight: 100, order: 10, constant: true }),
+      entry({ id: 3, group: '龙组', groupWeight: 100, order: 10, constant: true }),
+    ]);
+    expect(select(byId, [message('无关')]).entries.map((item) => item.id)).toEqual([3]);
+  });
+
+  it('不同组各活一条；空 group 的条目互不相干', () => {
+    const target = book([
+      entry({ id: 0, group: '甲组', groupWeight: 100, order: 10, constant: true }),
+      entry({ id: 1, group: '甲组', groupWeight: 200, order: 20, constant: true }),
+      entry({ id: 2, group: '乙组', groupWeight: 100, order: 30, constant: true }),
+      entry({ id: 3, group: '乙组', groupWeight: 300, order: 40, constant: true }),
+      entry({ id: 4, order: 50, constant: true }),
+      entry({ id: 5, order: 60, constant: true }),
+    ]);
+
+    const result = select(target, [message('无关')]);
+    expect(result.entries.map((item) => item.id)).toEqual([1, 3, 4, 5]);
+    expect(result.skipped.map((item) => item.id)).toEqual([0, 2]);
+  });
+});
+
+describe('selectWorldEntries 粘性', () => {
+  const stickyBook = (overrides: Partial<WorldEntry> = {}): WorldBook =>
+    book([entry({ keys: ['龙'], sticky: 2, ...overrides })]);
+
+  it('首次命中后 stickyUntil = turn + sticky', () => {
+    const result = select(stickyBook(), [message('龙')], { turn: 10 });
+    expect(result.entries.map((item) => item.id)).toEqual([0]);
+    expect(result.state).toEqual([{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }]);
+  });
+
+  it('粘性期内不带关键词也入选，过期那轮不再入选', () => {
+    const state = [{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }];
+    expect(pick(stickyBook(), [message('无关')], undefined, { turn: 11, state })).toHaveLength(1);
+    expect(pick(stickyBook(), [message('无关')], undefined, { turn: 12, state })).toHaveLength(1);
+    expect(pick(stickyBook(), [message('无关')], undefined, { turn: 13, state })).toHaveLength(0);
+  });
+
+  it('每命中一轮都顺延：turn=11 命中后 stickyUntil=13', () => {
+    const state = [{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }];
+    const result = select(stickyBook(), [message('无关')], { turn: 11, state });
+    expect(result.state).toEqual([{ entryId: 0, stickyUntil: 13, cooldownUntil: 0 }]);
+  });
+
+  it('粘性期内不掷骰：probability=0 也照样入选', () => {
+    let rolls = 0;
+    const state = [{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }];
+    const random = (): number => {
+      rolls += 1;
+      return 0.99;
+    };
+    expect(pick(stickyBook({ probability: 0 }), [message('无关')], undefined, { turn: 11, state, random })).toHaveLength(1);
+    expect(rolls).toBe(0);
+  });
+});
+
+describe('selectWorldEntries 冷却', () => {
+  const cooledBook = (): WorldBook => book([entry({ keys: ['龙'], cooldown: 3 })]);
+
+  it('cooldown=3：turn=10 触发后 11/12/13 被挡且记 cooldown，turn=14 恢复', () => {
+    const first = select(cooledBook(), [message('龙')], { turn: 10 });
+    expect(first.entries.map((item) => item.id)).toEqual([0]);
+    expect(first.state).toEqual([{ entryId: 0, stickyUntil: 0, cooldownUntil: 13 }]);
+
+    for (const turn of [11, 12, 13]) {
+      const result = select(cooledBook(), [message('无关')], { turn, state: first.state });
+      expect(result.entries).toEqual([]);
+      expect(result.skipped).toEqual([{ id: 0, name: '条目', reason: 'cooldown' }]);
+    }
+
+    expect(pick(cooledBook(), [message('龙')], undefined, { turn: 14, state: first.state })).toHaveLength(1);
+  });
+});
+
+describe('selectWorldEntries 延迟', () => {
+  it('delay=5：turn=4 被挡且记 delay，turn=5 可触发', () => {
+    const target = book([entry({ keys: ['龙'], delay: 5 })]);
+
+    const early = select(target, [message('龙')], { turn: 4 });
+    expect(early.entries).toEqual([]);
+    expect(early.skipped).toEqual([{ id: 0, name: '条目', reason: 'delay' }]);
+
+    expect(pick(target, [message('龙')], undefined, { turn: 5 })).toHaveLength(1);
+  });
+});
+
+describe('selectWorldEntries 状态回写', () => {
+  it('没入选但仍在冷却的行保留，过期行剔除', () => {
+    const target = book([entry({ keys: ['龙'], cooldown: 3 })]);
+    const state = [
+      { entryId: 0, stickyUntil: 0, cooldownUntil: 13 },
+      { entryId: 9, stickyUntil: 0, cooldownUntil: 5 },
+      { entryId: 8, stickyUntil: 20, cooldownUntil: 0 },
+    ];
+
+    const result = select(target, [message('无关')], { turn: 10, state });
+    expect(result.entries).toEqual([]);
+    expect(result.state).toEqual([
+      { entryId: 0, stickyUntil: 0, cooldownUntil: 13 },
+      { entryId: 8, stickyUntil: 20, cooldownUntil: 0 },
+    ]);
+  });
+
+  it('入选但既无粘性也无冷却的条目不进 state', () => {
+    const target = book([entry({ constant: true })]);
+    const result = select(target, [message('无关')], { turn: 10 });
+    expect(result.entries).toHaveLength(1);
+    expect(result.state).toEqual([]);
+  });
+
+  it('过期旧行被这一轮的新行替换', () => {
+    const target = book([entry({ keys: ['龙'], sticky: 2 })]);
+    const state = [{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }];
+
+    const result = select(target, [message('龙')], { turn: 20, state });
+    expect(result.state).toEqual([{ entryId: 0, stickyUntil: 22, cooldownUntil: 0 }]);
+  });
+});
+
+describe('selectWorldEntries 位置分组', () => {
+  it('五档各一条常驻条目：byPosition 各一条，entries 仍按 order/id 升序', () => {
+    const target = book([
+      entry({ id: 0, position: 'beforeChar', constant: true, content: '天头' }),
+      entry({ id: 1, position: 'afterChar', constant: true, content: '预设后' }),
+      entry({ id: 2, position: 'anTop', constant: true, content: 'AN上' }),
+      entry({ id: 3, position: 'anBottom', constant: true, content: 'AN下' }),
+      entry({ id: 4, position: 'atDepth', constant: true, content: '深度' }),
+    ]);
+
+    const result = select(target, [message('无关')]);
+    for (const position of WORLD_POSITIONS) {
+      expect(result.byPosition[position]).toHaveLength(1);
+    }
+    expect(result.byPosition.beforeChar[0]?.id).toBe(0);
+    expect(result.byPosition.afterChar[0]?.id).toBe(1);
+    expect(result.byPosition.anTop[0]?.id).toBe(2);
+    expect(result.byPosition.anBottom[0]?.id).toBe(3);
+    expect(result.byPosition.atDepth[0]?.id).toBe(4);
+    expect(result.entries.map((item) => item.id)).toEqual([0, 1, 2, 3, 4]);
+    // 2+3+3+3+2 字正文，四条连接符各 2 字
+    expect(result.usedChars).toBe(21);
+  });
+});
+
+describe('withWorldDepth 按 depth 插进消息队列', () => {
+  const history: ChatMessage[] = [
+    { role: 'user', content: '一' },
+    { role: 'assistant', content: '二' },
+    { role: 'user', content: '三' },
+    { role: 'assistant', content: '四' },
+  ];
+
+  it('depth 大的先插：4 落在队首、2 落在倒数第三条之前、0 落在末条之前', () => {
+    const out = withWorldDepth(history, [
+      entry({ id: 0, depth: 4, role: 'system', content: '设定四' }),
+      entry({ id: 1, depth: 2, role: 'user', content: '设定二' }),
+      entry({ id: 2, depth: 0, role: 'assistant', content: '设定零' }),
+    ]);
+
+    expect(out.map((item) => item.content)).toEqual(['设定四', '一', '设定二', '二', '三', '设定零', '四']);
+    expect(out.map((item) => item.role)).toEqual(['system', 'user', 'user', 'assistant', 'user', 'assistant', 'assistant']);
+    // 原数组不被改动
+    expect(history.map((item) => item.content)).toEqual(['一', '二', '三', '四']);
+  });
+
+  it('depth 超过消息条数时压到队首', () => {
+    const out = withWorldDepth([{ role: 'user', content: '唯一' }], [entry({ depth: 9, content: '设定' })]);
+    expect(out.map((item) => item.content)).toEqual(['设定', '唯一']);
+  });
+
+  it('空条目数组原样返回一份拷贝', () => {
+    const out = withWorldDepth(history, []);
+    expect(out).toEqual(history);
+    expect(out).not.toBe(history);
   });
 });
 

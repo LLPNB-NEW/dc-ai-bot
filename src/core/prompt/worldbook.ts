@@ -1,4 +1,9 @@
-import type { Scope, ScopedKey } from '../types';
+import type { ChatMessage, Role, Scope, ScopedKey } from '../types';
+
+/** 插入位置：与酒馆的五档一一对应，`atDepth` 是唯一进消息队列的一档 */
+export type WorldPosition = 'beforeChar' | 'afterChar' | 'anTop' | 'anBottom' | 'atDepth';
+
+export const WORLD_POSITIONS: readonly WorldPosition[] = ['beforeChar', 'afterChar', 'anTop', 'anBottom', 'atDepth'];
 
 /** 一条世界书条目：把酒馆几套字段名收敛成一份，触发与拼接只认这里的形状 */
 export interface WorldEntry {
@@ -14,6 +19,28 @@ export interface WorldEntry {
   order: number;
   caseSensitive: boolean;
   wholeWords: boolean;
+  /** 插到哪一段：system 的四个锚点，或按 depth 插进历史消息 */
+  position: WorldPosition;
+  /** 只对 atDepth 有意义：从倒数第几条之前插入 */
+  depth: number;
+  /** 只对 atDepth 有意义：这条消息以谁的口吻出现 */
+  role: Role;
+  /** 触发概率 0–100；100 表示必中，不再掷骰 */
+  probability: number;
+  /** 酒馆的开关：关掉就忽略 probability，按必中处理 */
+  useProbability: boolean;
+  /** 包含组：同组最多活一条，空串表示不参与分组 */
+  group: string;
+  /** 组内权重，大者胜 */
+  groupWeight: number;
+  /** 命中后还能继续活几轮（按轮滑动续期） */
+  sticky: number;
+  /** 触发后冷却几轮 */
+  cooldown: number;
+  /** 频道消息数不足这个值时永不触发 */
+  delay: number;
+  /** 这条自己的扫描深度；null 表示用书级默认 */
+  scanDepth: number | null;
 }
 
 /** 被跳过的条目：导入回执要说清「为什么这条没进来」，否则用户会以为书丢了 */
@@ -50,9 +77,28 @@ export interface WorldBookStore {
   remove(key: ScopedKey): Promise<void>;
 }
 
+/** 一条条目的粘性/冷却记账：轮次口径 = 该频道已存消息条数，落库才能活过重启 */
+export interface WorldEntryState {
+  entryId: number;
+  /** 到这一轮（含）仍然有效；0 表示没有粘性 */
+  stickyUntil: number;
+  /** 到这一轮（含）不得再触发；0 表示不在冷却 */
+  cooldownUntil: number;
+}
+
+/** 粘性/冷却的持久化端口：按频道存一份，与 WorldBookStore 同处，装配时一起接线 */
+export interface WorldBookStateStore {
+  load(guildId: string, channelId: string): Promise<WorldEntryState[]>;
+  save(guildId: string, channelId: string, rows: readonly WorldEntryState[]): Promise<void>;
+}
+
 export const WORLD_SCAN_DEPTH_DEFAULT = 4;
 export const WORLD_SCAN_DEPTH_MAX = 20;
 export const WORLD_BLOCK_MAX_CHARS = 4000;
+/** 与 injection.ts 的 INJECTION_DEPTH_MAX 同口径：插得比这更深已经没有意义 */
+export const WORLD_DEPTH_MAX = 50;
+export const WORLD_PROBABILITY_DEFAULT = 100;
+export const WORLD_GROUP_WEIGHT_DEFAULT = 100;
 
 /** 本仓库其余解析器的同款判据：数组也是 object，必须先排掉 */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -112,6 +158,68 @@ function readFlag(value: unknown, fallback: boolean): boolean {
   if (value === 1) return true;
   if (value === 0) return false;
   return fallback;
+}
+
+function clampInt(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  const floored = Math.floor(value);
+  if (floored < min) return min;
+  if (floored > max) return max;
+  return floored;
+}
+
+/**
+ * ST 口径数字码：0=↑Char、1=↓Char、2=↑AN、3=↓AN、4=@D。
+ * 缺省给 anTop：本仓库老库里的书没有这个字段，落到现有【世界书】位置才不会改变旧行为。
+ */
+export function readWorldPosition(value: unknown): WorldPosition {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    switch (Math.floor(value)) {
+      case 0:
+        return 'beforeChar';
+      case 1:
+        return 'afterChar';
+      case 3:
+        return 'anBottom';
+      case 4:
+        return 'atDepth';
+      default:
+        return 'anTop';
+    }
+  }
+  const text = readText(value).trim().toLowerCase().replace(/[\s_-]+/g, '');
+  switch (text) {
+    case '0':
+    case 'beforechar':
+      return 'beforeChar';
+    case '1':
+    case 'afterchar':
+      return 'afterChar';
+    case '3':
+    case 'anbottom':
+      return 'anBottom';
+    case '4':
+    case 'atdepth':
+      return 'atDepth';
+    case '2':
+    case 'antop':
+      return 'anTop';
+    default:
+      return 'anTop';
+  }
+}
+
+/** ST 的角色码：0=system、1=user、2=assistant；写错的导出按 system 处理 */
+export function readWorldRole(value: unknown): Role {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (Math.floor(value) === 1) return 'user';
+    if (Math.floor(value) === 2) return 'assistant';
+    return 'system';
+  }
+  const text = readText(value).trim().toLowerCase();
+  if (text === 'user') return 'user';
+  if (text === 'assistant') return 'assistant';
+  return 'system';
 }
 
 /**
@@ -245,6 +353,8 @@ export function parseWorldBook(raw: unknown): WorldBookParseResult {
       continue;
     }
 
+    const probability = clampInt(readNumber(pickField(item, ['probability']), WORLD_PROBABILITY_DEFAULT), 0, 100, WORLD_PROBABILITY_DEFAULT);
+    const rawScanDepth = pickField(item, ['scanDepth', 'scan_depth']);
     entries.push({
       id: slot.id,
       name,
@@ -258,6 +368,18 @@ export function parseWorldBook(raw: unknown): WorldBookParseResult {
       order: readNumber(pickField(item, ['insertion_order', 'order', 'priority']), 100),
       caseSensitive: readFlag(pickField(item, ['caseSensitive', 'case_sensitive']), false),
       wholeWords: readFlag(pickField(item, ['matchWholeWords', 'match_whole_words']), false),
+      position: readWorldPosition(pickField(item, ['position'])),
+      depth: clampInt(readNumber(pickField(item, ['depth']), WORLD_SCAN_DEPTH_DEFAULT), 0, WORLD_DEPTH_MAX, WORLD_SCAN_DEPTH_DEFAULT),
+      role: readWorldRole(pickField(item, ['role'])),
+      probability,
+      // 老导出只有 probability 没有开关：概率小于 100 就是「要用概率」，否则关掉
+      useProbability: readFlag(pickField(item, ['useProbability', 'use_probability']), probability < WORLD_PROBABILITY_DEFAULT),
+      group: readText(pickField(item, ['group'])).trim(),
+      groupWeight: clampInt(readNumber(pickField(item, ['groupWeight', 'group_weight']), WORLD_GROUP_WEIGHT_DEFAULT), 0, 100000, WORLD_GROUP_WEIGHT_DEFAULT),
+      sticky: clampInt(readNumber(pickField(item, ['sticky']), 0), 0, 10000, 0),
+      cooldown: clampInt(readNumber(pickField(item, ['cooldown']), 0), 0, 10000, 0),
+      delay: clampInt(readNumber(pickField(item, ['delay']), 0), 0, 100000, 0),
+      scanDepth: rawScanDepth === undefined ? null : clampScanDepth(readNumber(rawScanDepth, WORLD_SCAN_DEPTH_DEFAULT)),
     });
   }
 
@@ -270,6 +392,40 @@ export function parseWorldBook(raw: unknown): WorldBookParseResult {
     };
   }
   return { ok: true, value: { name: source.name, entries, ignored, warnings } };
+}
+
+/**
+ * 老库里的 book_json 是上一版规范化的产物，没有位置/概率/粘性这些字段。
+ * 读侧统一过一遍这里，选择管线就永远面对完整形状——缺省值刻意选 anTop，保持旧书的位置与行为。
+ */
+export function normalizeWorldEntry(entry: WorldEntry): WorldEntry {
+  const raw = entry as Partial<WorldEntry>;
+  const probability = clampInt(typeof raw.probability === 'number' ? raw.probability : WORLD_PROBABILITY_DEFAULT, 0, 100, WORLD_PROBABILITY_DEFAULT);
+  const scanDepth = raw.scanDepth;
+  return {
+    ...entry,
+    position: raw.position === undefined ? 'anTop' : readWorldPosition(raw.position),
+    depth: clampInt(typeof raw.depth === 'number' ? raw.depth : WORLD_SCAN_DEPTH_DEFAULT, 0, WORLD_DEPTH_MAX, WORLD_SCAN_DEPTH_DEFAULT),
+    role: raw.role === undefined ? 'system' : readWorldRole(raw.role),
+    probability,
+    useProbability: raw.useProbability === undefined ? probability < WORLD_PROBABILITY_DEFAULT : readFlag(raw.useProbability, true),
+    group: typeof raw.group === 'string' ? raw.group.trim() : '',
+    groupWeight: clampInt(typeof raw.groupWeight === 'number' ? raw.groupWeight : WORLD_GROUP_WEIGHT_DEFAULT, 0, 100000, WORLD_GROUP_WEIGHT_DEFAULT),
+    sticky: clampInt(typeof raw.sticky === 'number' ? raw.sticky : 0, 0, 10000, 0),
+    cooldown: clampInt(typeof raw.cooldown === 'number' ? raw.cooldown : 0, 0, 10000, 0),
+    delay: clampInt(typeof raw.delay === 'number' ? raw.delay : 0, 0, 100000, 0),
+    scanDepth: typeof scanDepth === 'number' && Number.isFinite(scanDepth) ? clampScanDepth(scanDepth) : null,
+  };
+}
+
+export function normalizeWorldBook(book: WorldBook): WorldBook {
+  const raw = book as Partial<WorldBook>;
+  return {
+    name: typeof raw.name === 'string' ? raw.name : '',
+    entries: Array.isArray(raw.entries) ? raw.entries.map(normalizeWorldEntry) : [],
+    ignored: Array.isArray(raw.ignored) ? raw.ignored : [],
+    warnings: Array.isArray(raw.warnings) ? raw.warnings : [],
+  };
 }
 
 /**
@@ -347,32 +503,166 @@ function matchesEntry(entry: WorldEntry, window: string): boolean {
   }
 }
 
+/** 被跳过的条目与原因：排障时「为什么这条没出现」全靠它 */
+export interface WorldSkip {
+  id: number;
+  name: string;
+  reason: 'delay' | 'cooldown' | 'probability' | 'group' | 'budget';
+}
+
+export interface WorldSelection {
+  /** 最终入选的条目，已按 order/id 升序，且已过全局字数预算 */
+  entries: WorldEntry[];
+  /** 同 entries，按插入位置分好，供装配处各自成段 */
+  byPosition: Record<WorldPosition, WorldEntry[]>;
+  skipped: WorldSkip[];
+  /** 下一轮要落库的粘性/冷却：过期的行不会出现在这里 */
+  state: WorldEntryState[];
+  usedChars: number;
+}
+
+export interface WorldSelectOptions {
+  /** 书级默认扫描深度；条目自己的 scanDepth 优先 */
+  scanDepth?: number;
+  /** 上一轮落库的粘性/冷却 */
+  state?: readonly WorldEntryState[];
+  /** 当前轮次 = 该频道已存消息条数；缺省 0（第一轮） */
+  turn?: number;
+  /** 测试注入的随机源，返回 [0,1) */
+  random?: () => number;
+}
+
+function emptyByPosition(): Record<WorldPosition, WorldEntry[]> {
+  return { beforeChar: [], afterChar: [], anTop: [], anBottom: [], atDepth: [] };
+}
+
+/** 概率掷骰：100% 不消耗随机数，「这次掷了几次骰」才可数 */
+function rollProbability(entry: WorldEntry, random: () => number): boolean {
+  if (!entry.useProbability) return true;
+  if (entry.probability >= WORLD_PROBABILITY_DEFAULT) return true;
+  if (entry.probability <= 0) return false;
+  return random() * 100 < entry.probability;
+}
+
 /**
- * 选条目：先按 order/id 排好再逐条按预算收，超预算的整条跳过而不是截断——
- * 截一半的设定比没有更容易把模型带偏。
+ * 选条目，顺序与酒馆一致：
+ * 关键词/常驻 → 延迟 → 粘性（直接续命）→ 冷却 → 概率 → 包含组取权重最高 → order/id 升序 → 4000 字预算。
+ * 掷骰与分组都在预算之前，预算只决定「最后塞不塞得下」。
  */
 export function selectWorldEntries(
   book: WorldBook,
   messages: readonly { role: string; content: string }[],
-  scanDepth: number = WORLD_SCAN_DEPTH_DEFAULT,
-): WorldEntry[] {
-  const depth = clampScanDepth(scanDepth);
-  const window = buildScanWindow(messages, depth);
-  const hits = book.entries.filter((entry) => matchesEntry(entry, window));
-  hits.sort((left, right) => left.order - right.order || left.id - right.id);
+  options: WorldSelectOptions = {},
+): WorldSelection {
+  const defaultDepth = clampScanDepth(options.scanDepth);
+  const turn = Math.max(0, Math.floor(options.turn ?? 0));
+  const random = options.random ?? Math.random;
+  const previous = new Map<number, WorldEntryState>();
+  for (const row of options.state ?? []) previous.set(row.entryId, row);
 
-  const picked: WorldEntry[] = [];
+  const windows = new Map<number, string>();
+  const windowFor = (depth: number): string => {
+    const cached = windows.get(depth);
+    if (cached !== undefined) return cached;
+    const built = buildScanWindow(messages, depth);
+    windows.set(depth, built);
+    return built;
+  };
+
+  const candidates: WorldEntry[] = [];
+  const skipped: WorldSkip[] = [];
+  for (const entry of book.entries) {
+    const state = previous.get(entry.id);
+    // 粘性期内既不看了关键词也不掷骰：酒馆的粘性就是「上一轮在，这一轮还在」，每轮顺延
+    if (entry.sticky > 0 && state !== undefined && state.stickyUntil >= turn) {
+      candidates.push(entry);
+      continue;
+    }
+    if (entry.cooldown > 0 && state !== undefined && state.cooldownUntil >= turn) {
+      skipped.push({ id: entry.id, name: entry.name, reason: 'cooldown' });
+      continue;
+    }
+    if (entry.delay > 0 && turn < entry.delay) {
+      skipped.push({ id: entry.id, name: entry.name, reason: 'delay' });
+      continue;
+    }
+    if (!matchesEntry(entry, windowFor(entry.scanDepth ?? defaultDepth))) continue;
+    if (!rollProbability(entry, random)) {
+      skipped.push({ id: entry.id, name: entry.name, reason: 'probability' });
+      continue;
+    }
+    candidates.push(entry);
+  }
+
+  // 包含组：先各自过完关键词与概率，再在组内取权重最高；并列时 order 小的优先
+  const grouped = new Map<string, WorldEntry[]>();
+  const winners: WorldEntry[] = [];
+  for (const entry of candidates) {
+    if (entry.group === '') {
+      winners.push(entry);
+      continue;
+    }
+    const members = grouped.get(entry.group);
+    if (members === undefined) grouped.set(entry.group, [entry]);
+    else members.push(entry);
+  }
+  for (const members of grouped.values()) {
+    members.sort((left, right) => right.groupWeight - left.groupWeight || left.order - right.order || left.id - right.id);
+    winners.push(members[0]!);
+    for (const loser of members.slice(1)) skipped.push({ id: loser.id, name: loser.name, reason: 'group' });
+  }
+  winners.sort((left, right) => left.order - right.order || left.id - right.id);
+
+  const entries: WorldEntry[] = [];
   let used = 0;
-  for (const entry of hits) {
+  for (const entry of winners) {
     const body = entry.content.trim();
     if (body === '') continue;
     // 连接符也算预算：保证 buildWorldBlock 的产物本身不越过上限
-    const cost = picked.length === 0 ? body.length : body.length + 2;
-    if (used + cost > WORLD_BLOCK_MAX_CHARS) continue;
+    const cost = entries.length === 0 ? body.length : body.length + 2;
+    if (used + cost > WORLD_BLOCK_MAX_CHARS) {
+      skipped.push({ id: entry.id, name: entry.name, reason: 'budget' });
+      continue;
+    }
     used += cost;
-    picked.push(entry);
+    entries.push(entry);
   }
-  return picked;
+
+  // 记账：没入选的条目只要粘性/冷却还没过期就保留原行，否则下一轮就漏挡了
+  const next = new Map<number, WorldEntryState>();
+  for (const row of previous.values()) {
+    if (row.stickyUntil > turn || row.cooldownUntil > turn) next.set(row.entryId, row);
+  }
+  for (const entry of entries) {
+    const stickyUntil = entry.sticky > 0 ? turn + entry.sticky : 0;
+    const cooldownUntil = entry.cooldown > 0 ? turn + entry.cooldown : 0;
+    if (stickyUntil > turn || cooldownUntil > turn) next.set(entry.id, { entryId: entry.id, stickyUntil, cooldownUntil });
+    else next.delete(entry.id);
+  }
+
+  const byPosition = emptyByPosition();
+  for (const entry of entries) byPosition[entry.position].push(entry);
+
+  return { entries, byPosition, skipped, state: [...next.values()], usedChars: used };
+}
+
+/**
+ * 把 @D 条目插进消息队列：depth 大的先插（离末尾更远），同深度的按 order 升序，
+ * 这样浅层条目最终落在深层之后，读起来仍是 order 的顺序。
+ */
+export function withWorldDepth(messages: readonly ChatMessage[], entries: readonly WorldEntry[]): ChatMessage[] {
+  if (entries.length === 0) return [...messages];
+  const ordered = [...entries].sort((left, right) => right.depth - left.depth || left.order - right.order || left.id - right.id);
+  const out = [...messages];
+  for (const entry of ordered) {
+    const body = entry.content.trim();
+    if (body === '') continue;
+    const limit = Math.max(0, out.length - 1);
+    const depth = clampInt(entry.depth, 0, limit, 0);
+    const at = out.length === 0 ? 0 : limit - depth;
+    out.splice(at, 0, { role: entry.role, content: body });
+  }
+  return out;
 }
 
 /** 合成一段 system 文本；标题行让模型知道这一段的出处，也让排障时一眼能认出 */

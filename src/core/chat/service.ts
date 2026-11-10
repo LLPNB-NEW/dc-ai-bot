@@ -20,8 +20,11 @@ import {
   buildWorldBlock,
   resolveWorldBook,
   selectWorldEntries,
+  withWorldDepth,
   type WorldBookRecord,
+  type WorldBookStateStore,
   type WorldBookStore,
+  type WorldEntryState,
 } from '../prompt/worldbook';
 import type { TemplateVars } from '../prompt/template';
 import { orderKeysForModel } from '../providers/key-match';
@@ -144,6 +147,8 @@ export interface ChatServiceDeps {
   promptInjections?: PromptInjectionStore;
   /** 世界书三层配置；没接线 = 三层都没有 = system 与接线前逐字一致 */
   worldBooks?: WorldBookStore;
+  /** 世界书条目的粘性/冷却记账；没接线 = 不落库，粘性与冷却当轮不算（其余字段照常） */
+  worldBookState?: WorldBookStateStore;
   providers: Record<ProviderId, LlmProvider>;
   /** 后台任务入口（Workers 里接 ctx.waitUntil）；缺省时任务直接丢弃，绝不影响本轮回复 */
   background?: (task: Promise<unknown>) => void;
@@ -533,12 +538,26 @@ export function renderVoiceHint(hint: boolean | undefined): string {
   return '\n\n【语音】\n想让这条回复被念出来，就在正文里单独写一行 [[voice]]；不念就不要写。这一行不会显示给对方。';
 }
 
+/** 两份记账是否等价：相同就不写库，没有粘性/冷却的频道因此一次写都不发 */
+function sameWorldState(left: readonly WorldEntryState[], right: readonly WorldEntryState[]): boolean {
+  if (left.length !== right.length) return false;
+  const byId = new Map<number, WorldEntryState>();
+  for (const row of left) byId.set(row.entryId, row);
+  for (const row of right) {
+    const other = byId.get(row.entryId);
+    if (other === undefined || other.stickyUntil !== row.stickyUntil || other.cooldownUntil !== row.cooldownUntil) return false;
+  }
+  return true;
+}
+
 export function createChatService(deps: ChatServiceDeps): ChatService {
   const { prompts, routes, keys, conversations, providers, config } = deps;
   // 摘要存储是本轮新增的依赖：老调用方没接线时退化成「没有长期记忆」，不能把整轮对话拖失败
   const summaries: SummaryStore | undefined = deps.summaries;
   // 表情模型同样是可选依赖：没接线就一次都不问，与 §18 逐字一致
   const reactionModels: ReactionModelStore | undefined = deps.reactionModels;
+  // 世界书粘性/冷却同样可选：没接线时只少一份记账，触发与拼段照旧
+  const worldBookState: WorldBookStateStore | undefined = deps.worldBookState;
   const now = deps.now ?? ((): Date => new Date());
   // 不接线也不炸（§19.6）；钩子是外部实现，真抛错也只能在 emit 里吞掉，绝不带崩回复链路
   const log = deps.log ?? ((): void => undefined);
@@ -1261,10 +1280,39 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
     const kept = dropRefusalHistory(tail.kept).map(withAuthorPrefix);
     // 扫描窗口取未署名的原文：带头上的「时刻+作者名」会让拿人名当关键词的条目每轮必中
     const worldWindow = [...tail.kept, { role: 'user', content: ctx.userText }];
-    // 命中的那本书按关键词选条目再合成一段；没书 / 一条没中时是空串，system 与旧版逐字相同
-    const worldBlock = worldBookHit === null ? '' : buildWorldBlock(selectWorldEntries(worldBookHit.book, worldWindow));
+    // 轮次口径 = 该频道已存消息条数：粘性/冷却/延迟都按它记账，重启也只是从库里接着数
+    const worldTurn = history.length;
+    let worldStateRows: WorldEntryState[] = [];
+    if (worldBookHit !== null && worldBookState !== undefined) {
+      try {
+        worldStateRows = await worldBookState.load(ctx.guildId, ctx.channelId);
+      } catch (error) {
+        console.warn('[chat] 读取世界书粘性/冷却失败，按无状态继续：' + describeError(error));
+      }
+    }
+    // 命中的那本书先按关键词/概率/包含组选条目；没书时一次都不选，system 与旧版逐字相同
+    const worldSelection =
+      worldBookHit === null
+        ? null
+        : selectWorldEntries(worldBookHit.book, worldWindow, { state: worldStateRows, turn: worldTurn });
+    // 粘性/冷却的变化立刻落库：这一轮就算被上游打回，下一轮的记账也必须已经生效
+    if (worldSelection !== null && worldBookState !== undefined && !sameWorldState(worldStateRows, worldSelection.state)) {
+      try {
+        await worldBookState.save(ctx.guildId, ctx.channelId, worldSelection.state);
+      } catch (error) {
+        console.warn('[chat] 写世界书粘性/冷却失败（不影响本轮回复）：' + describeError(error));
+      }
+    }
+    // 四档 system 锚点各自成段（每段自带一次【世界书】标题）；@D 那档是独立消息，正文不加标题
+    const worldBlocks = {
+      beforeChar: worldSelection === null ? '' : buildWorldBlock(worldSelection.byPosition.beforeChar),
+      afterChar: worldSelection === null ? '' : buildWorldBlock(worldSelection.byPosition.afterChar),
+      anTop: worldSelection === null ? '' : buildWorldBlock(worldSelection.byPosition.anTop),
+      anBottom: worldSelection === null ? '' : buildWorldBlock(worldSelection.byPosition.anBottom),
+    };
+    const worldDepthEntries = worldSelection === null ? [] : worldSelection.byPosition.atDepth;
     // 段自带「【世界书】」标题且不带换行：这里补两个换行，才不贴在前置段末尾、也不挤进身份块的标题行
-    const worldPart = worldBlock === '' ? '' : '\n\n' + worldBlock;
+    const worldPart = worldBlocks.anTop === '' ? '' : '\n\n' + worldBlocks.anTop;
     // 预设段又回到天头（§52）：它自己不带前导空行，用两个换行和后面的平台元信息分开
     const presetHead = promptParts.before === '' ? '' : promptParts.before + '\n\n';
     const presetAfter = promptParts.after === '' ? '' : '\n\n' + promptParts.after;
@@ -1273,8 +1321,16 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
     const presetMentionsVoice = (promptParts.before + '\n' + promptParts.after).includes(VOICE_DIRECTIVE);
     const voiceHint = presetMentionsVoice ? '' : renderVoiceHint(ctx.voiceHint);
     // 身份块自带两个前导换行（当年当天头时的分隔约定）；只有预设为空、它真出现在天头时才需要削掉
+    // 天头那一档（↑Char）压在预设段之前；↓Char 挂在预设段之后、平台元信息之前；
+    // ↓AN 接在预设 after 之后。三档都为空时整串与接线前逐字相同
+    const worldHeadPart = worldBlocks.beforeChar === '' ? '' : worldBlocks.beforeChar + '\n\n';
+    const worldAfterPart =
+      worldBlocks.afterChar === '' ? '' : (promptParts.before === '' ? '' : '\n\n') + worldBlocks.afterChar + '\n\n';
+    const worldBottomPart = worldBlocks.anBottom === '' ? '' : '\n\n' + worldBlocks.anBottom;
     const legacySystem =
+      worldHeadPart +
       presetHead +
+      worldAfterPart +
       identityBlock.replace(/^\n+/, '') +
       mentionRule +
       renderReactionGuide(guide.prompt) +
@@ -1283,7 +1339,8 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
       bodyEmojiPart +
       renderReactionTargets(ctx.reactionTargets) +
       worldPart +
-      presetAfter;
+      presetAfter +
+      worldBottomPart;
     // §55：这一模式不发任何平台元信息——预设正文、摘要与历史整体搬进 context 工具的描述，
     // system 只留那一句「正文在哪、怎么交付」，线上形状与酒馆那条重放一致
     // 上下文 system 是另一份固定文案，上面那一整串段落一个都不在里面 —— 包括【语音】段，
@@ -1329,7 +1386,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
     // 历史与摘要同理都已经在描述里，一条都不再进 messages
     const messages: ChatMessage[] = contextToolMode
       ? [{ role: 'user', content: CONTEXT_TOOL_TURN }]
-      : withInjection([...promptParts.userMessages, ...kept, turnPrompt], injection);
+      : withWorldDepth(withInjection([...promptParts.userMessages, ...kept, turnPrompt], injection), worldDepthEntries);
     // §55 描述体 = 预设段（before 再 after，保持原顺序）+ 世界书 + 长期记忆摘要 + 最近历史（署名行，一行一条）
     // + 本轮用户那一行（时刻 + 名字 + 正文，原样，放在最后一段）。
     // 世界书命中才有一段，所以没书时描述体与接线前逐字相同；位置在记忆之前——设定先立、记忆后叙（§65）
@@ -1339,7 +1396,11 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
       ? composeContextBody([
           promptParts.before,
           promptParts.after,
-          worldBlock,
+          // 四档锚点各自成段，顺序与 system 里一致；@D 这一档没有历史可插，直接跳过
+          worldBlocks.beforeChar,
+          worldBlocks.afterChar,
+          worldBlocks.anTop,
+          worldBlocks.anBottom,
           // 正文侧的自定义表情清单 + 正文表情规则合成一段：规则为空时整段是空串，会被 composeContextBody 滤掉
           bodyEmojiSection,
           summaryBlock.replace(/^\n+/, ''),
@@ -1378,7 +1439,8 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
       ' systemLen=' + system.length +
       ' guide=' + guide.scope +
       ' hist=' + String(historyMaxMessages) +
-      ' sum=' + String(summaryEveryMessages),
+      ' sum=' + String(summaryEveryMessages) +
+      ' world=' + (worldSelection === null ? 'off' : String(worldSelection.entries.length) + '/' + String(worldSelection.entries.length + worldSelection.skipped.length)),
     );
     const temperature = route.temperature ?? promptHit.cfg.temperature;
     // §55：这一模式照抄酒馆的 max_tokens；显式配过就尊重配置（路由 > 提示词层 > 65535）

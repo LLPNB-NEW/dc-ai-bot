@@ -3027,18 +3027,94 @@ export type WorldBookIgnoreReason = 'empty' | 'noKeys' | 'disabled';
 /** 结果区按这个顺序分组，取值清单放这里，页面只负责文案。 */
 export const WORLD_BOOK_IGNORE_REASONS: readonly WorldBookIgnoreReason[] = ['empty', 'noKeys', 'disabled'];
 
-export interface WorldBookEntrySummary {
-  id: string;
+/** 插入位置：与酒馆五档一一对应，只有 atDepth 进历史消息（落库时是数字码 0..4）。 */
+export type WorldPosition = 'beforeChar' | 'afterChar' | 'anTop' | 'anBottom' | 'atDepth';
+
+export const WORLD_POSITIONS: readonly WorldPosition[] = ['beforeChar', 'afterChar', 'anTop', 'anBottom', 'atDepth'];
+
+export const WORLD_POSITION_LABELS: Record<WorldPosition, string> = {
+  beforeChar: '↑Char（角色设定之前）',
+  afterChar: '↓Char（角色设定之后）',
+  anTop: '↑AN（作者注释顶部）',
+  anBottom: '↓AN（作者注释底部）',
+  atDepth: '@D（按深度插入历史）',
+};
+
+/** 副关键词的组合算法：any/all 是「命中」，not 是「不命中」。 */
+export type WorldSelectiveLogic = 'andAny' | 'andAll' | 'notAny' | 'notAll';
+
+export const WORLD_SELECTIVE_LOGICS: readonly WorldSelectiveLogic[] = ['andAny', 'andAll', 'notAny', 'notAll'];
+
+export const WORLD_SELECTIVE_LOGIC_LABELS: Record<WorldSelectiveLogic, string> = {
+  andAny: 'AND ANY（副关键词任一命中）',
+  andAll: 'AND ALL（副关键词全部命中）',
+  notAny: 'NOT ANY（副关键词一个都没命中）',
+  notAll: 'NOT ALL（副关键词没有全部命中）',
+};
+
+/** 条目以谁的口吻插入历史：与模型消息的 role 同值，页面只负责不让它变成别的值。 */
+export type WorldEntryRole = 'system' | 'user' | 'assistant';
+
+export const WORLD_ENTRY_ROLES: readonly WorldEntryRole[] = ['system', 'user', 'assistant'];
+
+export const WORLD_ENTRY_ROLE_LABELS: Record<WorldEntryRole, string> = {
+  system: 'system（系统指令）',
+  user: 'user（用户口吻）',
+  assistant: 'assistant（自己口吻）',
+};
+
+/**
+ * 与后端同值的范围：页面只用于校验与提示，落库仍由后端收口。
+ * 注意 delay：导入侧 clamp 与 PUT /api/world-book/entry 的校验都是 0..100000；
+ * sticky / cooldown 仍是 0..10000，两者别跟着放宽。
+ */
+export const WORLD_SCAN_DEPTH_DEFAULT = 4;
+export const WORLD_SCAN_DEPTH_MAX = 20;
+export const WORLD_DEPTH_MAX = 50;
+export const WORLD_PROBABILITY_DEFAULT = 100;
+export const WORLD_GROUP_WEIGHT_DEFAULT = 100;
+export const WORLD_GROUP_WEIGHT_MAX = 100000;
+export const WORLD_STICKY_MAX = 10000;
+export const WORLD_COOLDOWN_MAX = 10000;
+export const WORLD_DELAY_MAX = 100000;
+
+/** 一条完整条目：GET /api/world-book/entry 的 entry 与 PUT 的 entry 都是这个形状。 */
+export interface WorldBookEntry {
+  id: number;
   name: string;
   /** 主关键词：命中任意一个就触发（常驻条目不靠关键词）。 */
   keys: string[];
-  /** 副关键词：与主关键词同时命中才触发，空数组 = 没有这一层过滤。 */
+  /** 副关键词：与 selectiveLogic 一起决定「关键词都命中了还要不要这条」。 */
   secondaryKeys: string[];
+  content: string;
   /** true = 常驻，每轮都注入。 */
   constant: boolean;
   /** 停用的条目后端不参与装配，页面上也不按可用条目展示。 */
   enabled: boolean;
+  selective: boolean;
+  selectiveLogic: WorldSelectiveLogic;
   order: number;
+  caseSensitive: boolean;
+  wholeWords: boolean;
+  position: WorldPosition;
+  /** 只对 atDepth 有意义：从倒数第几条之前插入。 */
+  depth: number;
+  /** 只对 atDepth 有意义：这条消息以谁的口吻出现。 */
+  role: WorldEntryRole;
+  /** 触发概率 0–100；useProbability 关掉时按必中处理。 */
+  probability: number;
+  useProbability: boolean;
+  group: string;
+  groupWeight: number;
+  sticky: number;
+  cooldown: number;
+  delay: number;
+  /** null = 用书级默认（4）。 */
+  scanDepth: number | null;
+}
+
+/** 列表条目：完整条目去掉正文，换成正文字数（正文可能有几千字，列表不下发）。 */
+export interface WorldBookEntrySummary extends Omit<WorldBookEntry, 'content'> {
   /** 正文字数：正文不下发，列表只给规模。 */
   chars: number;
 }
@@ -3083,23 +3159,135 @@ function toStringList(raw: unknown): string[] {
   return items;
 }
 
-function toWorldBookEntry(raw: unknown): WorldBookEntrySummary | null {
-  const source = toRecord(raw);
-  const id = typeof source.id === 'string' ? source.id : '';
+/** 条目 id：契约里是数字，但老接口下发过字符串，两种都收。 */
+function readWorldEntryId(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.trunc(raw);
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) return Math.trunc(parsed);
+  }
+  return null;
+}
+
+/** 位置认名字也认酒馆数字码（0..4）；认不出按 anTop，与后端 normalizeWorldEntry 一致。 */
+function toWorldPosition(raw: unknown): WorldPosition {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const code = Math.floor(raw);
+    if (code === 0) return 'beforeChar';
+    if (code === 1) return 'afterChar';
+    if (code === 3) return 'anBottom';
+    if (code === 4) return 'atDepth';
+    return 'anTop';
+  }
+  for (const position of WORLD_POSITIONS) {
+    if (position === raw) return position;
+  }
+  return 'anTop';
+}
+
+function toWorldEntryRole(raw: unknown): WorldEntryRole {
+  if (raw === 'user' || raw === 'assistant') return raw;
+  return 'system';
+}
+
+/** 数字码 0=AND ANY、1=NOT ALL、2=NOT ANY、3=AND ALL，与后端 readSelectiveLogic 同口径。 */
+function toWorldSelectiveLogic(raw: unknown): WorldSelectiveLogic {
+  for (const logic of WORLD_SELECTIVE_LOGICS) {
+    if (logic === raw) return logic;
+  }
+  if (raw === 1) return 'notAll';
+  if (raw === 2) return 'notAny';
+  if (raw === 3) return 'andAll';
+  return 'andAny';
+}
+
+/** 关键词：数组照抄；单个逗号串拆开（酒馆导出两种写法都有）。 */
+function toWorldKeyList(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return toStringList(raw)
+      .map((item) => item.trim())
+      .filter((item) => item !== '');
+  }
+  if (typeof raw !== 'string') return [];
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item !== '');
+}
+
+function toNumeric(raw: unknown): number {
+  if (typeof raw === 'number') return raw;
+  if (typeof raw === 'string' && raw.trim() !== '') return Number(raw);
+  return Number.NaN;
+}
+
+function toWorldInt(raw: unknown, min: number, max: number, fallback: number): number {
+  const value = toNumeric(raw);
+  if (!Number.isFinite(value)) return fallback;
+  const floored = Math.floor(value);
+  if (floored < min) return min;
+  if (floored > max) return max;
+  return floored;
+}
+
+/** null = 用书级默认：后端只把 1–20 的整数当自己的扫描深度。 */
+function toWorldScanDepth(raw: unknown): number | null {
+  if (raw === null || raw === undefined) return null;
+  const value = toNumeric(raw);
+  if (!Number.isFinite(value)) return null;
+  const floored = Math.floor(value);
+  if (floored < 1) return 1;
+  if (floored > WORLD_SCAN_DEPTH_MAX) return WORLD_SCAN_DEPTH_MAX;
+  return floored;
+}
+
+/** 除正文外的全部字段：列表与详情共用这一份解析，字段口径只写一次。 */
+function readWorldEntryFields(source: Record<string, unknown>): Omit<WorldBookEntry, 'content'> | null {
+  const id = readWorldEntryId(source.id);
   // id 是表格行的 key，缺了就没法稳定渲染，丢弃。
-  if (id === '') return null;
-  const order = toFiniteNumber(source.order);
+  if (id === null) return null;
+  const probability = toWorldInt(source.probability, 0, 100, WORLD_PROBABILITY_DEFAULT);
   return {
     id,
     name: typeof source.name === 'string' ? source.name : '',
-    keys: toStringList(source.keys),
-    secondaryKeys: toStringList(source.secondaryKeys),
-    constant: source.constant === true,
+    keys: toWorldKeyList(source.keys),
+    secondaryKeys: toWorldKeyList(source.secondaryKeys),
     // 缺省按启用处理：停用是显式标记，没写就是参与装配的。
     enabled: source.enabled !== false,
-    order: order === undefined ? 0 : Math.trunc(order),
-    chars: toCount(source.chars),
+    constant: source.constant === true,
+    selective: source.selective === true,
+    selectiveLogic: toWorldSelectiveLogic(source.selectiveLogic),
+    order: toWorldInt(source.order, Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 0),
+    caseSensitive: source.caseSensitive === true,
+    wholeWords: source.wholeWords === true,
+    position: toWorldPosition(source.position),
+    depth: toWorldInt(source.depth, 0, WORLD_DEPTH_MAX, WORLD_SCAN_DEPTH_DEFAULT),
+    role: toWorldEntryRole(source.role),
+    probability,
+    // 老导出只有 probability：概率小于 100 就是「要用概率」，与导入时的缺省一致。
+    useProbability: typeof source.useProbability === 'boolean' ? source.useProbability : probability < WORLD_PROBABILITY_DEFAULT,
+    group: typeof source.group === 'string' ? source.group : '',
+    groupWeight: toWorldInt(source.groupWeight, 0, WORLD_GROUP_WEIGHT_MAX, WORLD_GROUP_WEIGHT_DEFAULT),
+    sticky: toWorldInt(source.sticky, 0, WORLD_STICKY_MAX, 0),
+    cooldown: toWorldInt(source.cooldown, 0, WORLD_COOLDOWN_MAX, 0),
+    delay: toWorldInt(source.delay, 0, WORLD_DELAY_MAX, 0),
+    scanDepth: toWorldScanDepth(source.scanDepth),
   };
+}
+
+function toWorldBookEntry(raw: unknown): WorldBookEntrySummary | null {
+  const source = toRecord(raw);
+  const fields = readWorldEntryFields(source);
+  if (fields === null) return null;
+  return { ...fields, chars: toCount(source.chars) };
+}
+
+/** 详情与保存回执都回完整条目（含正文）；形状不认识返回 null，由调用方决定抛错。 */
+function toWorldBookEntryDetail(raw: unknown): WorldBookEntry | null {
+  const source = toRecord(raw);
+  const fields = readWorldEntryFields(source);
+  if (fields === null) return null;
+  return { ...fields, content: typeof source.content === 'string' ? source.content : '' };
 }
 
 function toWorldBookIgnoreReason(raw: unknown): WorldBookIgnoreReason | null {
@@ -3203,6 +3391,36 @@ export function deleteWorldBook(key: { scope: Scope; scopeId: string }): Promise
   });
 }
 
+/**
+ * 契约 world-book：GET /api/world-book/entry?scope&scopeId&id 回 { entry }（含正文）。
+ * 404 WORLD_BOOK_NOT_FOUND / WORLD_ENTRY_NOT_FOUND 说明这一层或这条刚被换掉，交给 describeWorldBookEntryError。
+ */
+export async function fetchWorldBookEntry(scope: Scope, scopeId: string, id: number): Promise<WorldBookEntry> {
+  const params = new URLSearchParams();
+  params.set('scope', scope);
+  params.set('scopeId', normalizeScopeId(scope, typeof scopeId === 'string' ? scopeId : ''));
+  params.set('id', String(id));
+  const raw = await request<unknown>('GET', '/api/world-book/entry?' + params.toString());
+  const entry = toWorldBookEntryDetail(toRecord(raw).entry);
+  if (entry === null) throw new ApiError(0, { error: 'BAD_RESPONSE' }, '读取成功，但接口回的条目形状不认识');
+  return entry;
+}
+
+/**
+ * 契约 world-book：PUT /api/world-book/entry body { scope, scopeId, entry } 回 { entry }。
+ * entry 传完整条目（含正文与 id）；400 BAD_WORLD_ENTRY 带 detail，页面原样显示。
+ */
+export async function saveWorldBookEntry(scope: Scope, scopeId: string, entry: WorldBookEntry): Promise<WorldBookEntry> {
+  const raw = await request<unknown>('PUT', '/api/world-book/entry', {
+    scope,
+    scopeId: normalizeScopeId(scope, typeof scopeId === 'string' ? scopeId : ''),
+    entry,
+  });
+  const saved = toWorldBookEntryDetail(toRecord(raw).entry);
+  if (saved === null) throw new ApiError(0, { error: 'BAD_RESPONSE' }, '保存成功，但接口回的形状不认识');
+  return saved;
+}
+
 /** 世界书的 400 / 501 码翻成中文再显示；BAD_SCOPE 与 401 交给 describeError，别写两套文案。 */
 export function describeWorldBookError(error: unknown): string {
   if (error instanceof ApiError) {
@@ -3220,6 +3438,23 @@ export function describeWorldBookError(error: unknown): string {
     }
     if (error.code === 'WORLDBOOK_UNAVAILABLE') {
       return '服务端没接世界书能力（501）：先把库表和接口接上再导';
+    }
+  }
+  return describeError(error);
+}
+
+/** 逐条编辑的 400 / 404 码翻成中文；认不出的码（含 BAD_SCOPE、401）交给 describeError。 */
+export function describeWorldBookEntryError(error: unknown): string {
+  if (error instanceof ApiError) {
+    const detail = typeof error.payload['detail'] === 'string' ? error.payload['detail'] : '';
+    if (error.code === 'BAD_WORLD_ENTRY') {
+      return detail !== '' ? '条目没保存：' + detail : '条目没保存：后端说字段不合法，检查一下数值范围和必填项';
+    }
+    if (error.code === 'WORLD_BOOK_NOT_FOUND') {
+      return '这一层的世界书不见了（404）：可能刚被删除或换了层，关掉表单刷新后再试';
+    }
+    if (error.code === 'WORLD_ENTRY_NOT_FOUND') {
+      return '这条条目不见了（404）：可能刚被整本覆盖，关掉表单刷新后再试';
     }
   }
   return describeError(error);

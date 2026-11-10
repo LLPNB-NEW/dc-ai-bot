@@ -43,6 +43,7 @@ const EXPECTED_FILES = [
   '0031_body_emoji_guides.sql',
   '0032_tts_gemini_dialect.sql',
   '0033_timeout_settings.sql',
+  '0034_world_book_state.sql',
 ];
 
 const ROOT = mkdtempSync(join(tmpdir(), 'dc-ai-bot-migrate-'));
@@ -63,7 +64,7 @@ afterAll(() => {
 });
 
 describe('runMigrations', () => {
-  it('33 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
+  it('34 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
     const filePath = newDbPath();
     const first = await runMigrations(filePath, MIGRATIONS_DIR);
     expect(first.applied).toEqual(EXPECTED_FILES);
@@ -231,6 +232,56 @@ describe('runMigrations', () => {
 
     // CHECK 是最后一道闸：绕过接口直接写脏 scope 必须失败，不能落库后让读侧去猜
     await expect(insert.bind('team', '', 'x', '{}', 0, '2026-01-01T00:00:03.000Z').run()).rejects.toThrow();
+  });
+
+  it('0034 建出 world_book_state：主键 (guild_id, channel_id, entry_id)、两个计时列默认 0', async () => {
+    const filePath = newDbPath();
+    await runMigrations(filePath, MIGRATIONS_DIR);
+    const db = createSqliteDatabase(filePath);
+
+    const columns = await db
+      .prepare('PRAGMA table_info(world_book_state)')
+      .all<{ name: string; type: string; notnull: number; pk: number; dflt_value: string | null }>();
+    expect(columns.results.map((column) => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['guild_id', 'TEXT', 1, 1],
+      ['channel_id', 'TEXT', 1, 2],
+      ['entry_id', 'INTEGER', 1, 3],
+      ['sticky_until', 'INTEGER', 1, 0],
+      ['cooldown_until', 'INTEGER', 1, 0],
+      ['updated_at', 'TEXT', 1, 0],
+    ]);
+    expect(columns.results.map((column) => column.dflt_value)).toEqual([null, null, null, '0', '0', null]);
+
+    // 行里只给主键与 updated_at：两个计时的 DEFAULT 0 生效（仓储有时只写「还有冷却」这一半）
+    await db
+      .prepare('INSERT INTO world_book_state (guild_id, channel_id, entry_id, updated_at) VALUES (?, ?, ?, ?)')
+      .bind('', 'c1', 7, '2026-01-01T00:00:00.000Z')
+      .run();
+    await db
+      .prepare(
+        'INSERT INTO world_book_state (guild_id, channel_id, entry_id, sticky_until, cooldown_until, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .bind('g1', 'c1', 7, 3, 4, '2026-01-01T00:00:01.000Z')
+      .run();
+    const rows = await db
+      .prepare(
+        'SELECT guild_id, channel_id, entry_id, sticky_until, cooldown_until, updated_at FROM world_book_state ORDER BY guild_id, channel_id, entry_id',
+      )
+      .all();
+    expect(rows.results).toEqual([
+      { guild_id: '', channel_id: 'c1', entry_id: 7, sticky_until: 0, cooldown_until: 0, updated_at: '2026-01-01T00:00:00.000Z' },
+      { guild_id: 'g1', channel_id: 'c1', entry_id: 7, sticky_until: 3, cooldown_until: 4, updated_at: '2026-01-01T00:00:01.000Z' },
+    ]);
+
+    // 主键含 entry_id：同频道同条目再插一条必须失败，不能悄悄多出一行
+    await expect(
+      db
+        .prepare(
+          'INSERT INTO world_book_state (guild_id, channel_id, entry_id, sticky_until, cooldown_until, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        )
+        .bind('g1', 'c1', 7, 9, 9, '2026-01-01T00:00:02.000Z')
+        .run(),
+    ).rejects.toThrow();
   });
 
   it('0032 重建 tts_settings：老行十二列原样保留，gemini 可写，脏方言被 CHECK 拒', async () => {

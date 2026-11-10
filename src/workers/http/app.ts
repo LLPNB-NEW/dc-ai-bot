@@ -29,7 +29,16 @@ import {
   isInjectionRole,
   type PromptInjectionStore,
 } from '../../core/prompt/injection';
-import { parseWorldBook, type WorldBookStore } from '../../core/prompt/worldbook';
+import {
+  normalizeWorldEntry,
+  parseWorldBook,
+  readWorldPosition,
+  WORLD_DEPTH_MAX,
+  WORLD_POSITIONS,
+  WORLD_SCAN_DEPTH_MAX,
+  type WorldBookStore,
+  type WorldEntry,
+} from '../../core/prompt/worldbook';
 import type { PresetImportStore } from '../db/d1-repository';
 import { clampPgErrorsLimit, PG_ERRORS_DEFAULT_LIMIT, PgErrorsUnavailableError, type PgErrorsSource } from '../../core/pg-errors';
 import {
@@ -593,6 +602,158 @@ async function readJsonBody(c: Context): Promise<Record<string, unknown> | null>
   }
 }
 
+type WorldEntryInput = { ok: true; entry: WorldEntry } | { ok: false; detail: string };
+
+/** 关键词列表与导入解析同一口径：去空白、丢掉空串（constant 条目可以本来就是空数组） */
+function readWorldKeyList(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const keys: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') return null;
+    const text = item.trim();
+    if (text !== '') keys.push(text);
+  }
+  return keys;
+}
+
+/** 有界整数：保存是整份覆盖，越界不夹取而是拒掉——夹取会让后台以为存进去的是原值 */
+function readBoundedWorldInt(value: unknown, min: number, max: number): number | null {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) return null;
+  return value < min || value > max ? null : value;
+}
+
+/**
+ * PUT /api/world-book/entry 的单条校验：可编辑字段一个都不能少，detail 直接点名是第一项不合格的。
+ * 合法值统一交给 normalizeWorldEntry 收口（trim、位置/角色的兜底都在那里）。
+ */
+function readWorldEntryInput(value: unknown): WorldEntryInput {
+  if (!isRecord(value)) return { ok: false, detail: 'entry 缺失或不是对象' };
+  const fail = (field: string, rule: string): WorldEntryInput => ({ ok: false, detail: field + ' ' + rule });
+
+  const id = value['id'];
+  if (typeof id !== 'number' || !Number.isSafeInteger(id)) return fail('id', '必须是整数');
+
+  const name = value['name'];
+  if (typeof name !== 'string' || name.trim() === '') return fail('name', '不能为空');
+
+  const content = value['content'];
+  if (typeof content !== 'string' || content.trim() === '') return fail('content', '不能为空');
+
+  const keys = readWorldKeyList(value['keys']);
+  if (keys === null) return fail('keys', '必须是字符串数组');
+  const secondaryKeys = readWorldKeyList(value['secondaryKeys']);
+  if (secondaryKeys === null) return fail('secondaryKeys', '必须是字符串数组');
+
+  const enabled = value['enabled'];
+  const constant = value['constant'];
+  const selective = value['selective'];
+  const caseSensitive = value['caseSensitive'];
+  const wholeWords = value['wholeWords'];
+  const useProbability = value['useProbability'];
+  if (typeof enabled !== 'boolean') return fail('enabled', '必须是布尔值');
+  if (typeof constant !== 'boolean') return fail('constant', '必须是布尔值');
+  if (typeof selective !== 'boolean') return fail('selective', '必须是布尔值');
+  if (typeof caseSensitive !== 'boolean') return fail('caseSensitive', '必须是布尔值');
+  if (typeof wholeWords !== 'boolean') return fail('wholeWords', '必须是布尔值');
+  if (typeof useProbability !== 'boolean') return fail('useProbability', '必须是布尔值');
+
+  const selectiveLogic = value['selectiveLogic'];
+  if (
+    selectiveLogic !== 'andAny' &&
+    selectiveLogic !== 'andAll' &&
+    selectiveLogic !== 'notAny' &&
+    selectiveLogic !== 'notAll'
+  ) {
+    return fail('selectiveLogic', '必须是 andAny/andAll/notAny/notAll');
+  }
+
+  const order = value['order'];
+  if (typeof order !== 'number' || !Number.isSafeInteger(order)) return fail('order', '必须是有限整数');
+
+  const position = value['position'];
+  if (typeof position !== 'string' || !(WORLD_POSITIONS as readonly string[]).includes(position)) {
+    return fail('position', '必须是 ' + WORLD_POSITIONS.join('/'));
+  }
+
+  const role = value['role'];
+  if (role !== 'system' && role !== 'user' && role !== 'assistant') {
+    return fail('role', '必须是 system/user/assistant');
+  }
+
+  const depth = readBoundedWorldInt(value['depth'], 0, WORLD_DEPTH_MAX);
+  if (depth === null) return fail('depth', '必须是 0..' + String(WORLD_DEPTH_MAX) + ' 的整数');
+
+  const probability = value['probability'];
+  if (typeof probability !== 'number' || !Number.isFinite(probability) || probability < 0 || probability > 100) {
+    return fail('probability', '必须是 0..100 的数字');
+  }
+
+  const group = value['group'];
+  if (typeof group !== 'string') return fail('group', '必须是字符串');
+
+  const groupWeight = readBoundedWorldInt(value['groupWeight'], 0, 100000);
+  if (groupWeight === null) return fail('groupWeight', '必须是 0..100000 的整数');
+
+  const sticky = readBoundedWorldInt(value['sticky'], 0, 10000);
+  if (sticky === null) return fail('sticky', '必须是 0..10000 的整数');
+  const cooldown = readBoundedWorldInt(value['cooldown'], 0, 10000);
+  if (cooldown === null) return fail('cooldown', '必须是 0..10000 的整数');
+  // delay 与导入侧同口径到 100000；sticky/cooldown 仍是 0..10000，别跟着放宽
+  const delay = readBoundedWorldInt(value['delay'], 0, 100000);
+  if (delay === null) return fail('delay', '必须是 0..100000 的整数');
+
+  // scanDepth 的 null 是「用书级默认」，必须显式写出来，缺字段不当成 null
+  const rawScanDepth = value['scanDepth'];
+  let scanDepth: number | null;
+  if (rawScanDepth === null) {
+    scanDepth = null;
+  } else {
+    scanDepth = readBoundedWorldInt(rawScanDepth, 1, WORLD_SCAN_DEPTH_MAX);
+    if (scanDepth === null) {
+      return fail('scanDepth', '必须是 null 或 1..' + String(WORLD_SCAN_DEPTH_MAX) + ' 的整数');
+    }
+  }
+
+  return {
+    ok: true,
+    entry: normalizeWorldEntry({
+      id,
+      // 名字与正文 trim 的规则与导入一致：只判空白，正文原样存（保留换行与缩进）
+      name: name.trim(),
+      keys,
+      secondaryKeys,
+      content,
+      enabled,
+      constant,
+      selective,
+      selectiveLogic,
+      order,
+      caseSensitive,
+      wholeWords,
+      position: readWorldPosition(position),
+      depth,
+      role,
+      probability,
+      useProbability,
+      group,
+      groupWeight,
+      sticky,
+      cooldown,
+      delay,
+      scanDepth,
+    }),
+  };
+}
+
+/** 查询串里的 id：纯十进制数字，小数/空串/负号一律按 400 处理 */
+function readWorldEntryId(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
 /** 每段 content 都会过 renderTemplate，未知变量必须逐段拦 */
 function collectUnknownVars(...templates: Array<string | undefined>): string[] {
   const unknown = new Set<string>();
@@ -1058,17 +1219,36 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
         name: record.name,
         entryCount: record.entryCount,
         importedAt: record.importedAt,
-        entries: record.book.entries.map((entry) => ({
-          id: entry.id,
-          name: entry.name,
-          keys: entry.keys,
-          secondaryKeys: entry.secondaryKeys,
-          constant: entry.constant,
-          enabled: entry.enabled,
-          order: entry.order,
-          // 按码点算长度：emoji 与中文混排时 UTF-16 长度会虚高，后台的字符数要对得上正文
-          chars: Array.from(entry.content).length,
-        })),
+        entries: record.book.entries.map((entry) => {
+          // 老库里的条目缺位置/概率这些字段：读侧先过一遍规范化，列表与单条编辑拿到同一份口径
+          const normalized = normalizeWorldEntry(entry);
+          return {
+            id: normalized.id,
+            name: normalized.name,
+            keys: normalized.keys,
+            secondaryKeys: normalized.secondaryKeys,
+            constant: normalized.constant,
+            enabled: normalized.enabled,
+            order: normalized.order,
+            // 按码点算长度：emoji 与中文混排时 UTF-16 长度会虚高，后台的字符数要对得上正文
+            chars: Array.from(normalized.content).length,
+            selective: normalized.selective,
+            selectiveLogic: normalized.selectiveLogic,
+            caseSensitive: normalized.caseSensitive,
+            wholeWords: normalized.wholeWords,
+            position: normalized.position,
+            depth: normalized.depth,
+            role: normalized.role,
+            probability: normalized.probability,
+            useProbability: normalized.useProbability,
+            group: normalized.group,
+            groupWeight: normalized.groupWeight,
+            sticky: normalized.sticky,
+            cooldown: normalized.cooldown,
+            delay: normalized.delay,
+            scanDepth: normalized.scanDepth,
+          };
+        }),
       })),
     });
   });
@@ -1116,6 +1296,59 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
 
     await store.remove(key);
     return c.json({ ok: true });
+  });
+
+  // 单条读取：列表为了截断不回正文，编辑弹窗要正文就只能按 id 单取一条
+  app.get('/api/world-book/entry', async (c) => {
+    const store = deps.worldBooks;
+    if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
+    const key = readScopeKey({ scope: c.req.query('scope'), scopeId: c.req.query('scopeId') });
+    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
+    if (key === null) return badRequest(c);
+
+    const entryId = readWorldEntryId(c.req.query('id'));
+    if (entryId === null) return c.json({ error: 'BAD_WORLD_ENTRY' }, 400);
+
+    const record = await store.get(key);
+    if (record === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
+    const entry = record.book.entries.find((item) => item.id === entryId);
+    if (entry === undefined) return c.json({ error: 'WORLD_ENTRY_NOT_FOUND' }, 404);
+    // 老库里的条目缺字段：读侧规范化后再回，弹窗拿到的形状与保存时完全一致
+    return c.json({ entry: normalizeWorldEntry(entry) });
+  });
+
+  // 单条保存：只换同 id 那一条，整本回写；其余条目与 ignored/warnings 原样带过去
+  app.put('/api/world-book/entry', async (c) => {
+    const store = deps.worldBooks;
+    if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
+    const body = await readJsonBody(c);
+    if (body === null) return badRequest(c);
+    const key = readScopeKey(body);
+    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
+    if (key === null) return badRequest(c);
+
+    // 校验先于查库：坏条目与「书不存在」无关，400 比 404 更容易定位
+    const parsed = readWorldEntryInput(body['entry']);
+    if (!parsed.ok) return c.json({ error: 'BAD_WORLD_ENTRY', detail: parsed.detail }, 400);
+    const entry = parsed.entry;
+
+    const record = await store.get(key);
+    if (record === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
+    // 只允许改书里已有的条目：PUT 不做新增，新增仍走整本导入
+    if (!record.book.entries.some((item) => item.id === entry.id)) {
+      return c.json({ error: 'WORLD_ENTRY_NOT_FOUND' }, 404);
+    }
+
+    await store.put({
+      scope: key.scope,
+      scopeId: key.scopeId,
+      name: record.name,
+      book: {
+        ...record.book,
+        entries: record.book.entries.map((item) => (item.id === entry.id ? entry : item)),
+      },
+    });
+    return c.json({ entry });
   });
 
   // 酒馆预设导入：整层覆盖目标层（global / guild / channel）的段，采样参数按同一层读旧值原样带过去。

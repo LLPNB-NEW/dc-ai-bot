@@ -11,7 +11,13 @@ import {
   CONTEXT_TOOL_SYSTEM,
   CONTEXT_TOOL_TURN,
 } from '../src/core/chat/context-tool';
-import type { WorldBook, WorldBookRecord, WorldEntry } from '../src/core/prompt/worldbook';
+import type {
+  WorldBook,
+  WorldBookStateStore,
+  WorldBookRecord,
+  WorldEntry,
+  WorldEntryState,
+} from '../src/core/prompt/worldbook';
 import { withAuthorPrefix } from '../src/core/chat/line';
 import type { ReactionModelStore } from '../src/core/ports';
 import type {
@@ -223,6 +229,8 @@ function makeHarness(input: {
     guild?: WorldBookRecord | null;
     global?: WorldBookRecord | null;
   };
+  /** 世界书粘性/冷却状态库；不给 = 没接线，一次都不读写 */
+  worldBookState?: WorldBookStateStore;
   /** 频道级记忆配置（§26）；不给 = 没接线，一次都不问，请求与接线前逐字一致 */
   channelMemory?: ChannelMemoryConfig | null;
 }): Harness {
@@ -410,6 +418,7 @@ function makeHarness(input: {
             async remove() {},
           },
         }),
+    ...(input.worldBookState === undefined ? {} : { worldBookState: input.worldBookState }),
     ...(input.promptInjections === undefined
       ? {}
       : {
@@ -3040,6 +3049,17 @@ describe('世界书进 system', () => {
       order: 100,
       caseSensitive: false,
       wholeWords: false,
+      position: 'anTop',
+      depth: 4,
+      role: 'system',
+      probability: 100,
+      useProbability: true,
+      group: '',
+      groupWeight: 100,
+      sticky: 0,
+      cooldown: 0,
+      delay: 0,
+      scanDepth: null,
       ...overrides,
     };
   }
@@ -3049,11 +3069,36 @@ describe('世界书进 system', () => {
     return { scope: 'global', scopeId: '', name: '测试书', book, entryCount: 1, importedAt: FIXED_NOW, ...overrides };
   }
 
+  function bookOf(entries: WorldEntry[], overrides: Partial<WorldBookRecord> = {}): WorldBookRecord {
+    const book: WorldBook = { name: '测试书', entries, ignored: [], warnings: [] };
+    return {
+      scope: 'global',
+      scopeId: '',
+      name: '测试书',
+      book,
+      entryCount: entries.length,
+      importedAt: FIXED_NOW,
+      ...overrides,
+    };
+  }
+
+  function stateStore(
+    rows: WorldEntryState[],
+    saveImpl?: () => Promise<void>,
+  ): { store: WorldBookStateStore; load: ReturnType<typeof vi.fn>; save: ReturnType<typeof vi.fn> } {
+    const load = vi.fn(async () => rows);
+    const save = vi.fn(async (_guildId: string, _channelId: string, _rows: readonly WorldEntryState[]) => {
+      if (saveImpl !== undefined) await saveImpl();
+    });
+    return { store: { load, save }, load, save };
+  }
+
   async function runSystem(input: {
     worldBooks?: Parameters<typeof makeHarness>[0]['worldBooks'];
+    worldBookState?: WorldBookStateStore;
     history?: ChatMessage[];
     userText?: string;
-  }): Promise<{ system: string; harness: Harness }> {
+  }): Promise<{ system: string; harness: Harness; request: LlmRequest | undefined; text: string }> {
     const requests: LlmRequest[] = [];
     const harness = makeHarness({
       providers: { 'openai-compat': streamProvider('openai-compat', ['好的'], { onRequest: (req) => requests.push(req) }) },
@@ -3062,10 +3107,11 @@ describe('世界书进 system', () => {
       history: input.history ?? HISTORY,
       prompts: { global: { segments: [segment('main', '基本设定')] } },
       ...(input.worldBooks === undefined ? {} : { worldBooks: input.worldBooks }),
+      ...(input.worldBookState === undefined ? {} : { worldBookState: input.worldBookState }),
     });
     const ctx = input.userText === undefined ? CTX : { ...CTX, userText: input.userText };
-    await createChatService(harness.deps).run(ctx);
-    return { system: requests[0]?.system ?? '', harness };
+    const result = await createChatService(harness.deps).run(ctx);
+    return { system: requests[0]?.system ?? '', harness, request: requests[0], text: result.text };
   }
 
   it('没接线时 system 与改动前逐字相同，且一次世界书都不查', async () => {
@@ -3149,6 +3195,120 @@ describe('世界书进 system', () => {
     const appended = (harness.appendCalls[0]?.messages ?? []).map((message) => message.content);
     expect(appended).toHaveLength(2);
     expect(appended.some((content) => content.includes('世界书'))).toBe(false);
+  });
+
+  it('四档 system 落点各就各位：↑Char 在预设前、↓Char 在预设后平台信息前、↑AN 在原世界书位置、↓AN 在最后', async () => {
+    const target = bookOf([
+      entry({ id: 0, name: '天头', constant: true, position: 'beforeChar', content: '天头设定' }),
+      entry({ id: 1, name: '预设后', constant: true, position: 'afterChar', content: '预设后设定' }),
+      entry({ id: 2, name: 'AN上', constant: true, position: 'anTop', content: 'AN上设定' }),
+      entry({ id: 3, name: 'AN下', constant: true, position: 'anBottom', content: 'AN下设定' }),
+    ]);
+
+    const { system } = await runSystem({ worldBooks: { global: target } });
+
+    expect(system).toBe(
+      '【世界书】\n天头设定' +
+        '\n\n基本设定' +
+        // 预设段自带两个换行，↓Char 段前面再补两个：这段夹在预设与平台元信息之间
+        '\n\n\n\n【世界书】\n预设后设定' +
+        '\n\n' +
+        platformHead(CTX, TODAY) +
+        '\n\n【世界书】\nAN上设定' +
+        '\n\n【世界书】\nAN下设定',
+    );
+    const presetAt = system.indexOf('基本设定');
+    const platformAt = system.indexOf(platformHead(CTX, TODAY));
+    expect(system.indexOf('天头设定')).toBeLessThan(presetAt);
+    expect(system.indexOf('预设后设定')).toBeGreaterThan(presetAt);
+    expect(system.indexOf('预设后设定')).toBeLessThan(platformAt);
+    expect(system.indexOf('AN上设定')).toBeGreaterThan(platformAt);
+    expect(system.indexOf('AN下设定')).toBeGreaterThan(system.indexOf('AN上设定'));
+  });
+
+  it('@D 条目作为独立消息进 messages，正文不带【世界书】标题', async () => {
+    const target = bookOf([
+      entry({ constant: true, position: 'atDepth', depth: 0, role: 'assistant', content: '深层设定。' }),
+    ]);
+
+    const { system, request } = await runSystem({ worldBooks: { global: target }, userText: '龙来了' });
+
+    expect(system).not.toContain('深层设定');
+    const messages = request?.messages ?? [];
+    expect(messages.at(-2)).toEqual({ role: 'assistant', content: '深层设定。' });
+    expect(messages.filter((message) => message.content === '深层设定。')).toHaveLength(1);
+    expect(messages.some((message) => message.content.includes('【世界书】'))).toBe(false);
+  });
+
+  it('粘性状态按 (guildId, channelId) 读进来，算完后原样写回去', async () => {
+    const target = bookOf([entry({ keys: ['龙'], sticky: 2 })]);
+    const { store, load, save } = stateStore([]);
+
+    const { system } = await runSystem({
+      worldBooks: { global: target },
+      worldBookState: store,
+      userText: '龙来了',
+    });
+
+    expect(system).toContain('【世界书】\n龙住在山里。');
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledWith('g1', 'c1');
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledWith('g1', 'c1', [{ entryId: 0, stickyUntil: 4, cooldownUntil: 0 }]);
+  });
+
+  it('state 与选择结果一致时不写库', async () => {
+    const target = bookOf([entry({ constant: true })]);
+    const { store, load, save } = stateStore([]);
+
+    const { system } = await runSystem({ worldBooks: { global: target }, worldBookState: store });
+
+    expect(system).toContain('【世界书】');
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('写库抛错只 warn，回复照常给出', async () => {
+    const target = bookOf([entry({ keys: ['龙'], sticky: 2 })]);
+    const { store } = stateStore([], async () => {
+      throw new Error('磁盘满了');
+    });
+    const warnings = spyWarnings();
+    try {
+      const { text } = await runSystem({
+        worldBooks: { global: target },
+        worldBookState: store,
+        userText: '龙来了',
+      });
+
+      expect(text).toBe('好的');
+      expect(warnings.lines.some((line) => line.includes('[chat] 写世界书粘性/冷却失败'))).toBe(true);
+      expect(warnings.lines.some((line) => line.includes('磁盘满了'))).toBe(true);
+    } finally {
+      warnings.restore();
+    }
+  });
+
+  it('读库抛错也只 warn：按无状态继续，这一轮照样命中并写回', async () => {
+    const target = bookOf([entry({ keys: ['龙'], sticky: 2 })]);
+    const load = vi.fn(async () => {
+      throw new Error('库挂了');
+    });
+    const save = vi.fn(async () => {});
+    const warnings = spyWarnings();
+    try {
+      const { system } = await runSystem({
+        worldBooks: { global: target },
+        worldBookState: { load, save },
+        userText: '龙来了',
+      });
+
+      expect(system).toContain('【世界书】\n龙住在山里。');
+      expect(warnings.lines.some((line) => line.includes('[chat] 读取世界书粘性/冷却失败'))).toBe(true);
+      expect(save).toHaveBeenCalledWith('g1', 'c1', [{ entryId: 0, stickyUntil: 4, cooldownUntil: 0 }]);
+    } finally {
+      warnings.restore();
+    }
   });
 });
 
@@ -3274,6 +3434,17 @@ describe('§55 上下文工具模式（contextTool）', () => {
           order: 100,
           caseSensitive: false,
           wholeWords: false,
+          position: 'anTop',
+          depth: 4,
+          role: 'system',
+          probability: 100,
+          useProbability: true,
+          group: '',
+          groupWeight: 100,
+          sticky: 0,
+          cooldown: 0,
+          delay: 0,
+          scanDepth: null,
         },
       ],
       ignored: [],
@@ -3310,6 +3481,64 @@ describe('§55 上下文工具模式（contextTool）', () => {
     expect(description.indexOf('【世界书】')).toBeLessThan(description.indexOf('<recall>'));
   });
 
+  it('§65 @D 档在这个模式里不插消息：顶层仍只有那一句，描述体也不带深度条目', async () => {
+    const requests: LlmRequest[] = [];
+    const book: WorldBook = {
+      name: '测试书',
+      entries: [
+        {
+          id: 0,
+          name: '深层',
+          keys: [],
+          secondaryKeys: [],
+          content: '深层设定。',
+          enabled: true,
+          constant: true,
+          selective: false,
+          selectiveLogic: 'andAny',
+          order: 100,
+          caseSensitive: false,
+          wholeWords: false,
+          position: 'atDepth',
+          depth: 1,
+          role: 'system',
+          probability: 100,
+          useProbability: true,
+          group: '',
+          groupWeight: 100,
+          sticky: 0,
+          cooldown: 0,
+          delay: 0,
+          scanDepth: null,
+        },
+      ],
+      ignored: [],
+      warnings: [],
+    };
+    const harness = makeHarness({
+      providers: {
+        'openai-compat': toolProvider(
+          'openai-compat',
+          { text: '', toolCalls: [{ name: 'story_reply', arguments: REPLY_ARGS }] },
+          { onRequest: (req) => requests.push(req) },
+        ),
+      },
+      keys: { 'openai-compat': decryptedKey('openai-compat') },
+      routes: { global: ROUTE },
+      prompts: { global: { segments: [segment('main', PRESET)] } },
+      worldBooks: {
+        global: { scope: 'global', scopeId: '', name: '测试书', book, entryCount: 1, importedAt: FIXED_NOW },
+      },
+      channelMemory: memoryConfig({ contextTool: true }),
+    });
+
+    await createChatService(harness.deps).run({ ...CTX, userText: '龙来了' });
+
+    const request = requests[0];
+    expect(request?.messages).toEqual([{ role: 'user', content: CONTEXT_TOOL_TURN }]);
+    expect(request?.tools?.[0]?.function.description ?? '').not.toContain('深层设定');
+  });
+
 
   it('正文表情规则与自定义表情清单一并进描述体：清单只列名字，世界书之后、<recall> 之前', async () => {
     const requests: LlmRequest[] = [];
@@ -3329,6 +3558,17 @@ describe('§55 上下文工具模式（contextTool）', () => {
           order: 100,
           caseSensitive: false,
           wholeWords: false,
+          position: 'anTop',
+          depth: 4,
+          role: 'system',
+          probability: 100,
+          useProbability: true,
+          group: '',
+          groupWeight: 100,
+          sticky: 0,
+          cooldown: 0,
+          delay: 0,
+          scanDepth: null,
         },
       ],
       ignored: [],
