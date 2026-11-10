@@ -236,7 +236,7 @@ function createRequestHandlers(db: SqlDatabase, env: NodeEnv, tracker: TaskTrack
     ttsStyles: data.ttsStyles,
     // 深度注入：三层各一行，聊天装配按 channel > guild > global 取第一个非空
     promptInjections: data.promptInjections,
-    // 世界书：三层各一本整本覆盖，聊天装配按 channel > guild > global 取第一本
+    // 世界书：每层可存多本，聊天装配按 channel > guild > global 取第一个有启用条目的层
     worldBooks: data.worldBooks,
     ttsEnvPresent: legacyTtsEnvPresent(),
     // §23.1/§23.6：认图读写的落库表，以及那棵「后台认图」按钮背后的执行器

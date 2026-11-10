@@ -33,9 +33,12 @@ import {
   normalizeWorldEntry,
   parseWorldBook,
   readWorldPosition,
+  uniqueWorldBookName,
   WORLD_DEPTH_MAX,
   WORLD_POSITIONS,
   WORLD_SCAN_DEPTH_MAX,
+  type WorldBook,
+  type WorldBookRecord,
   type WorldBookStore,
   type WorldEntry,
 } from '../../core/prompt/worldbook';
@@ -606,6 +609,45 @@ type WorldEntryInput = { ok: true; entry: WorldEntry } | { ok: false; detail: st
 
 /** 空层新建时用户自己起的书名：够用就行，只挡空串与离谱长串 */
 const WORLD_BOOK_NAME_MAX = 80;
+
+/** bookId 由服务端生成（UUID），这里只挡空串与离谱长串，不校验具体格式 */
+const WORLD_BOOK_ID_MAX = 100;
+
+function readWorldBookId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const id = value.trim();
+  return id === '' || id.length > WORLD_BOOK_ID_MAX ? null : id;
+}
+
+/** 条目摘要：正文上千字，列表不回正文；长度按码点算，emoji 与中文混排才和后台显示对得上 */
+function worldEntrySummary(entry: WorldEntry): Record<string, unknown> {
+  const normalized = normalizeWorldEntry(entry);
+  return {
+    id: normalized.id,
+    name: normalized.name,
+    keys: normalized.keys,
+    secondaryKeys: normalized.secondaryKeys,
+    constant: normalized.constant,
+    enabled: normalized.enabled,
+    order: normalized.order,
+    chars: Array.from(normalized.content).length,
+    selective: normalized.selective,
+    selectiveLogic: normalized.selectiveLogic,
+    caseSensitive: normalized.caseSensitive,
+    wholeWords: normalized.wholeWords,
+    position: normalized.position,
+    depth: normalized.depth,
+    role: normalized.role,
+    probability: normalized.probability,
+    useProbability: normalized.useProbability,
+    group: normalized.group,
+    groupWeight: normalized.groupWeight,
+    sticky: normalized.sticky,
+    cooldown: normalized.cooldown,
+    delay: normalized.delay,
+    scanDepth: normalized.scanDepth,
+  };
+}
 
 /** 关键词列表与导入解析同一口径：去空白、丢掉空串（constant 条目可以本来就是空数组） */
 function readWorldKeyList(value: unknown): string[] | null {
@@ -1217,53 +1259,27 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     return c.json({ ok: true });
   });
 
-  // 世界书（酒馆 lorebook）：一层一本、导入即整本覆盖，取哪一层由 core 按 channel > guild > global 决定。
+  // 世界书（酒馆 lorebook）：一层可以有多本，导入永远新增一本；core 按 channel > guild > global 选层，层内启用的全参与。
   // GET 只回条目摘要：正文可能有几千字，后台列表用不上，正文只在触发时由 core 读
   app.get('/api/world-book', async (c) => {
     const store = deps.worldBooks;
     if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
-    const items = await store.list();
+    const records = await store.list();
     return c.json({
-      items: items.map((record) => ({
+      items: records.map((record) => ({
         scope: record.scope,
         scopeId: record.scopeId,
+        bookId: record.bookId,
         name: record.name,
+        enabled: record.enabled,
         entryCount: record.entryCount,
         importedAt: record.importedAt,
-        entries: record.book.entries.map((entry) => {
-          // 老库里的条目缺位置/概率这些字段：读侧先过一遍规范化，列表与单条编辑拿到同一份口径
-          const normalized = normalizeWorldEntry(entry);
-          return {
-            id: normalized.id,
-            name: normalized.name,
-            keys: normalized.keys,
-            secondaryKeys: normalized.secondaryKeys,
-            constant: normalized.constant,
-            enabled: normalized.enabled,
-            order: normalized.order,
-            // 按码点算长度：emoji 与中文混排时 UTF-16 长度会虚高，后台的字符数要对得上正文
-            chars: Array.from(normalized.content).length,
-            selective: normalized.selective,
-            selectiveLogic: normalized.selectiveLogic,
-            caseSensitive: normalized.caseSensitive,
-            wholeWords: normalized.wholeWords,
-            position: normalized.position,
-            depth: normalized.depth,
-            role: normalized.role,
-            probability: normalized.probability,
-            useProbability: normalized.useProbability,
-            group: normalized.group,
-            groupWeight: normalized.groupWeight,
-            sticky: normalized.sticky,
-            cooldown: normalized.cooldown,
-            delay: normalized.delay,
-            scanDepth: normalized.scanDepth,
-          };
-        }),
+        entries: record.book.entries.map(worldEntrySummary),
       })),
     });
   });
 
+  // 导入永远新增一本：同名不覆盖，重名由 uniqueWorldBookName 加「（2）」区分（只给后台看，不参与匹配）
   app.post('/api/world-book/import', async (c) => {
     const store = deps.worldBooks;
     if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
@@ -1277,50 +1293,62 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     const parsed = parseWorldBook(body['book']);
     if (!parsed.ok) return c.json({ error: parsed.error, detail: parsed.detail }, 400);
 
-    // replaced 只是给后台提示「这一层原来有几条」，不参与任何取值
-    const existing = await store.get(key);
-    const saved = await store.put({
-      scope: key.scope,
-      scopeId: key.scopeId,
-      name: parsed.value.name,
-      book: parsed.value,
-    });
+    const records = await store.list();
+    const sameLayer = records.filter((record) => record.scope === key.scope && record.scopeId === key.scopeId);
+    const name = uniqueWorldBookName(sameLayer.map((record) => record.name), parsed.value.name);
+    const saved = await store.create({ scope: key.scope, scopeId: key.scopeId, name, book: parsed.value });
     return c.json({
       scope: saved.scope,
       scopeId: saved.scopeId,
+      bookId: saved.bookId,
       name: saved.name,
       entryCount: saved.entryCount,
       ignored: parsed.value.ignored,
       warnings: parsed.value.warnings,
-      replaced: existing === null ? 0 : existing.entryCount,
+      layerCount: sameLayer.length + 1,
     });
   });
 
+  // 删一本书：整本连同它的粘性/冷却记账一起移除（store.remove 里同批删）
   app.delete('/api/world-book', async (c) => {
     const store = deps.worldBooks;
     if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
     const body = await readJsonBody(c);
     if (body === null) return badRequest(c);
-    const key = readScopeKey(body);
-    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
-    if (key === null) return badRequest(c);
+    const bookId = readWorldBookId(body['bookId']);
+    if (bookId === null) return c.json({ error: 'BAD_BOOK_ID' }, 400);
 
-    await store.remove(key);
+    await store.remove(bookId);
     return c.json({ ok: true });
   });
 
-  // 单条读取：列表为了截断不回正文，编辑弹窗要正文就只能按 id 单取一条
+  // 整本开关：停用只是不参与装配，书还留在库里，随时可以再开
+  app.patch('/api/world-book', async (c) => {
+    const store = deps.worldBooks;
+    if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
+    const body = await readJsonBody(c);
+    if (body === null) return badRequest(c);
+    const bookId = readWorldBookId(body['bookId']);
+    if (bookId === null) return c.json({ error: 'BAD_BOOK_ID' }, 400);
+    const enabled = body['enabled'];
+    if (typeof enabled !== 'boolean') return c.json({ error: 'BAD_BOOK_ENABLED' }, 400);
+
+    const saved = await store.update({ bookId, enabled });
+    if (saved === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
+    return c.json({ bookId: saved.bookId, enabled: saved.enabled });
+  });
+
+  // 单条读取：列表为了截断不回正文，编辑弹窗要正文就只能按 bookId + id 单取一条
   app.get('/api/world-book/entry', async (c) => {
     const store = deps.worldBooks;
     if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
-    const key = readScopeKey({ scope: c.req.query('scope'), scopeId: c.req.query('scopeId') });
-    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
-    if (key === null) return badRequest(c);
+    const bookId = readWorldBookId(c.req.query('bookId'));
+    if (bookId === null) return c.json({ error: 'BAD_BOOK_ID' }, 400);
 
     const entryId = readWorldEntryId(c.req.query('id'));
     if (entryId === null) return c.json({ error: 'BAD_WORLD_ENTRY' }, 400);
 
-    const record = await store.get(key);
+    const record = await store.get(bookId);
     if (record === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
     const entry = record.book.entries.find((item) => item.id === entryId);
     if (entry === undefined) return c.json({ error: 'WORLD_ENTRY_NOT_FOUND' }, 404);
@@ -1334,91 +1362,111 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
     const body = await readJsonBody(c);
     if (body === null) return badRequest(c);
-    const key = readScopeKey(body);
-    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
-    if (key === null) return badRequest(c);
+    const bookId = readWorldBookId(body['bookId']);
+    if (bookId === null) return c.json({ error: 'BAD_BOOK_ID' }, 400);
 
     // 校验先于查库：坏条目与「书不存在」无关，400 比 404 更容易定位
     const parsed = readWorldEntryInput(body['entry']);
     if (!parsed.ok) return c.json({ error: 'BAD_WORLD_ENTRY', detail: parsed.detail }, 400);
     const entry = parsed.entry;
 
-    const record = await store.get(key);
+    const record = await store.get(bookId);
     if (record === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
-    // 只允许改书里已有的条目：PUT 不做新增，新增仍走整本导入
+    // 只允许改书里已有的条目：PUT 不做新增
     if (!record.book.entries.some((item) => item.id === entry.id)) {
       return c.json({ error: 'WORLD_ENTRY_NOT_FOUND' }, 404);
     }
 
-    await store.put({
-      scope: key.scope,
-      scopeId: key.scopeId,
-      name: record.name,
+    const saved = await store.update({
+      bookId,
       book: {
         ...record.book,
         entries: record.book.entries.map((item) => (item.id === entry.id ? entry : item)),
       },
     });
+    if (saved === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
     return c.json({ entry });
   });
 
-  // 新建单条：id 由服务端分配（本层 max + 1），空层带 bookName 时顺手建一本
+  // 新建单条：id 由服务端分配（本书 max + 1）；不带 bookId 时按层新建一本，bookName 必填
   app.post('/api/world-book/entry', async (c) => {
     const store = deps.worldBooks;
     if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
     const body = await readJsonBody(c);
     if (body === null) return badRequest(c);
-    const key = readScopeKey(body);
-    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
-    if (key === null) return badRequest(c);
+    const rawBookId = body['bookId'];
+    const hasBookId = rawBookId !== undefined && rawBookId !== null;
+    let key: ScopedKey | null = null;
+    if (!hasBookId) {
+      const parsedKey = readScopeKey(body);
+      if (parsedKey === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
+      if (parsedKey === null) return badRequest(c);
+      key = parsedKey;
+    }
 
     // 校验先于查库：坏条目与「书不存在」无关，400 比 404 更好定位
     const parsed = readWorldEntryInput(body['entry'], { requireId: false });
     if (!parsed.ok) return c.json({ error: 'BAD_WORLD_ENTRY', detail: parsed.detail }, 400);
 
-    const existing = await store.get(key);
-    let bookName = existing === null ? '' : existing.name;
-    if (existing === null) {
-      // 空层没有书名可用：新建时必须是用户自己填的（导入那条路仍由酒馆的书名决定）
-      const raw = body['bookName'];
-      const name = typeof raw === 'string' ? raw.trim() : '';
-      if (name === '' || name.length > WORLD_BOOK_NAME_MAX) return c.json({ error: 'BAD_BOOK_NAME' }, 400);
-      bookName = name;
+    let record: WorldBookRecord | null = null;
+    if (hasBookId) {
+      const bookId = readWorldBookId(rawBookId);
+      if (bookId === null) return c.json({ error: 'BAD_BOOK_ID' }, 400);
+      record = await store.get(bookId);
+      if (record === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
     }
 
-    // 新 id 只在本书内唯一：删过的 id 不复用，避免粘性/冷却记账串到新条目上
-    const nextId = existing === null ? 1 : existing.book.entries.reduce((max, item) => Math.max(max, item.id), 0) + 1;
-    const entry: WorldEntry = { ...parsed.entry, id: nextId };
-    const book =
-      existing === null
-        ? { name: bookName, entries: [entry], ignored: [], warnings: [] }
-        : { ...existing.book, entries: [...existing.book.entries, entry] };
+    let bookName = record === null ? '' : record.name;
+    let sameLayer: WorldBookRecord[] = [];
+    if (record === null && key !== null) {
+      // 这一层还没有这本书：书名是用户自己填的（导入那条路仍由酒馆的书名决定）
+      const raw = body['bookName'];
+      const wanted = typeof raw === 'string' ? raw.trim() : '';
+      if (wanted === '' || wanted.length > WORLD_BOOK_NAME_MAX) return c.json({ error: 'BAD_BOOK_NAME' }, 400);
+      const records = await store.list();
+      sameLayer = records.filter((item) => item.scope === key.scope && item.scopeId === key.scopeId);
+      bookName = uniqueWorldBookName(sameLayer.map((item) => item.name), wanted);
+    }
 
-    const saved = await store.put({ scope: key.scope, scopeId: key.scopeId, name: bookName, book });
+    // 新 id 只在本书内唯一且只增不减：计数器落进 book_json 的 nextEntryId，
+    // 删掉最大号再新建也不会复用——粘性/冷却按 entryId 记账，复用会把旧账串给新条目
+    const maxId = record === null ? 0 : record.book.entries.reduce((max, item) => Math.max(max, item.id), 0);
+    const nextId = Math.max(record === null ? 0 : record.book.nextEntryId ?? 0, maxId + 1, 1);
+    const entry: WorldEntry = { ...parsed.entry, id: nextId };
+    const base: WorldBook = record === null ? { name: bookName, entries: [], ignored: [], warnings: [] } : record.book;
+    const book: WorldBook = { ...base, entries: [...base.entries, entry], nextEntryId: nextId + 1 };
+
+    const saved =
+      record === null && key !== null
+        ? await store.create({ scope: key.scope, scopeId: key.scopeId, name: bookName, book })
+        : record === null
+          ? null
+          : await store.update({ bookId: record.bookId, book });
+    if (saved === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
     return c.json({
       entry,
+      bookId: saved.bookId,
       name: saved.name,
       entryCount: saved.entryCount,
       importedAt: saved.importedAt,
-      createdBook: existing === null,
+      createdBook: record === null,
     });
   });
 
-  // 删除单条：删到一条不剩就连整本书一起移除，这一层回到「未导入」而不是空书遮住上层
+  // 删除单条：删到一条不剩就连整本书一起移除，这一层才不会留一本空书
   app.delete('/api/world-book/entry', async (c) => {
     const store = deps.worldBooks;
     if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
     const body = await readJsonBody(c);
     if (body === null) return badRequest(c);
-    const key = readScopeKey(body);
-    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
-    if (key === null) return badRequest(c);
+    const bookId = readWorldBookId(body['bookId']);
+    if (bookId === null) return c.json({ error: 'BAD_BOOK_ID' }, 400);
 
     // 删除走 JSON body，id 是数字；读查询参数那套字符串口径在这不适用
     const entryId = readBoundedWorldInt(body['id'], 0, Number.MAX_SAFE_INTEGER);
     if (entryId === null) return c.json({ error: 'BAD_WORLD_ENTRY', detail: 'id 必须是非负整数' }, 400);
 
-    const record = await store.get(key);
+    const record = await store.get(bookId);
     if (record === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
     if (!record.book.entries.some((item) => item.id === entryId)) {
       return c.json({ error: 'WORLD_ENTRY_NOT_FOUND' }, 404);
@@ -1426,15 +1474,11 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
 
     const entries = record.book.entries.filter((item) => item.id !== entryId);
     if (entries.length === 0) {
-      await store.remove(key);
+      await store.remove(bookId);
       return c.json({ ok: true, entryCount: 0, removedBook: true });
     }
-    const saved = await store.put({
-      scope: key.scope,
-      scopeId: key.scopeId,
-      name: record.name,
-      book: { ...record.book, entries },
-    });
+    const saved = await store.update({ bookId, book: { ...record.book, entries } });
+    if (saved === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
     return c.json({ ok: true, entryCount: saved.entryCount, removedBook: false });
   });
 

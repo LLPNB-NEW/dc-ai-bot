@@ -1113,6 +1113,7 @@ describe('admin route table', () => {
       'POST /api/tts-settings/test',
       'POST /api/world-book/import',
       'POST /api/world-book/entry',
+      'PATCH /api/world-book',
       'PUT /api/body-emoji-guides',
       'PUT /api/emoji-aliases',
       'PUT /api/memory-settings',

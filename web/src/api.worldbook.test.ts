@@ -3,14 +3,20 @@ import {
   ApiError,
   WORLD_BOOK_NAME_RULE,
   createWorldBookEntry,
+  deleteWorldBook,
   deleteWorldBookEntry,
   describeWorldBookEntryError,
+  fetchWorldBook,
+  importWorldBook,
+  updateWorldBookEnabled,
 } from './api';
 import type { WorldBookEntry } from './api';
 
-// 契约 world-book：web 侧只负责按形状发请求、按错误码翻文案，POST 与 DELETE 各验一遍。
+// 契约 world-book：一层多本。web 侧按 bookId 定位、按形状发请求、按错误码翻文案。
 
 const GUILD = '111111111111111111';
+const BOOK_A = 'book-a';
+const BOOK_B = 'book-b';
 
 interface CapturedCall {
   path: string;
@@ -62,50 +68,179 @@ function draftEntry(): WorldBookEntry {
   };
 }
 
+function bookPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    scope: 'global',
+    scopeId: '',
+    bookId: BOOK_A,
+    name: '第一本',
+    enabled: true,
+    entryCount: 2,
+    importedAt: '2026-11-11T00:00:00.000Z',
+    entries: [],
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('web 侧世界书新建（POST /api/world-book/entry）', () => {
-  it('请求体是 { scope, scopeId, bookName, entry }，id 原样 0 交给后端分配', async () => {
+describe('web 侧世界书列表（GET /api/world-book）', () => {
+  it('解析一层的多本：bookId / enabled 都在，缺 bookId 的行丢弃', async () => {
+    stubFetch({
+      items: [
+        bookPayload(),
+        bookPayload({ bookId: BOOK_B, name: '第二本', enabled: false }),
+        bookPayload({ bookId: '' }),
+      ],
+    });
+
+    const books = await fetchWorldBook();
+
+    expect(books).toHaveLength(2);
+    expect(books[0].bookId).toBe(BOOK_A);
+    expect(books[0].enabled).toBe(true);
+    expect(books[1].bookId).toBe(BOOK_B);
+    expect(books[1].enabled).toBe(false);
+  });
+});
+
+describe('web 侧世界书导入（POST /api/world-book/import）', () => {
+  it('导入永远新增一本：回执解析 bookId 与 layerCount，不再有 replaced', async () => {
+    const calls = stubFetch({
+      scope: 'global',
+      scopeId: '',
+      bookId: BOOK_B,
+      name: '重名（2）',
+      entryCount: 3,
+      ignored: [],
+      warnings: [],
+      layerCount: 2,
+    });
+
+    const result = await importWorldBook({ scope: 'global', scopeId: '', book: { entries: {} } });
+
+    expect(calls[0].path).toBe('/api/world-book/import');
+    expect(calls[0].init.method).toBe('POST');
+    expect(bodyOf(calls[0]).scope).toBe('global');
+    expect(bodyOf(calls[0]).scopeId).toBe('');
+    expect(result.bookId).toBe(BOOK_B);
+    expect(result.name).toBe('重名（2）');
+    expect(result.layerCount).toBe(2);
+    expect('replaced' in result).toBe(false);
+  });
+});
+
+describe('web 侧整本开关 / 删除整本（PATCH / DELETE /api/world-book）', () => {
+  it('PATCH body 只有 { bookId, enabled }，回执按 bookId 更新那一行', async () => {
+    const calls = stubFetch({ bookId: BOOK_B, enabled: false });
+
+    const result = await updateWorldBookEnabled(BOOK_B, false);
+
+    expect(calls[0].path).toBe('/api/world-book');
+    expect(calls[0].init.method).toBe('PATCH');
+    expect(bodyOf(calls[0])).toEqual({ bookId: BOOK_B, enabled: false });
+    expect(result).toEqual({ bookId: BOOK_B, enabled: false });
+  });
+
+  it('PATCH 回执漏了 enabled 时按请求值收，界面不回跳', async () => {
+    stubFetch({ bookId: BOOK_A });
+
+    const result = await updateWorldBookEnabled(BOOK_A, false);
+
+    expect(result.enabled).toBe(false);
+  });
+
+  it('DELETE 整本只发 bookId：同层其它书不动', async () => {
+    const calls = stubFetch({ ok: true });
+
+    await deleteWorldBook(BOOK_A);
+
+    expect(calls[0].path).toBe('/api/world-book');
+    expect(calls[0].init.method).toBe('DELETE');
+    expect(bodyOf(calls[0])).toEqual({ bookId: BOOK_A });
+  });
+
+  it('失败：BAD_BOOK_ID / BAD_BOOK_ENABLED 都有中文文案', () => {
+    const badId = new ApiError(400, { error: 'BAD_BOOK_ID' }, 'BAD_BOOK_ID');
+    const badEnabled = new ApiError(400, { error: 'BAD_BOOK_ENABLED' }, 'BAD_BOOK_ENABLED');
+
+    expect(describeWorldBookEntryError(badId)).toContain('bookId 不合法');
+    expect(describeWorldBookEntryError(badEnabled)).toContain('整本开关只接受');
+  });
+});
+
+describe('web 侧世界书新建条目（POST /api/world-book/entry）', () => {
+  it('带 bookId：请求体只有 { bookId, entry }，不再带 scope / bookName', async () => {
     const calls = stubFetch({
       entry: { ...draftEntry(), id: 7 },
+      bookId: BOOK_A,
+      name: '第一本',
+      entryCount: 3,
+      importedAt: '2026-11-11T00:00:00.000Z',
+      createdBook: false,
+    });
+
+    const created = await createWorldBookEntry({
+      scope: 'global',
+      scopeId: '',
+      bookId: BOOK_A,
+      bookName: '不该被发送',
+      entry: draftEntry(),
+    });
+
+    expect(calls[0].path).toBe('/api/world-book/entry');
+    expect(calls[0].init.method).toBe('POST');
+    expect(bodyOf(calls[0])).toEqual({ bookId: BOOK_A, entry: draftEntry() });
+    expect(created.bookId).toBe(BOOK_A);
+    expect(created.entry.id).toBe(7);
+    expect(created.createdBook).toBe(false);
+  });
+
+  it('不带 bookId：请求体是 { scope, scopeId, bookName, entry }，bookName 空时发 null', async () => {
+    const calls = stubFetch({
+      entry: { ...draftEntry(), id: 1 },
+      bookId: BOOK_B,
       name: '新的一本',
       entryCount: 1,
       importedAt: '2026-11-11T00:00:00.000Z',
       createdBook: true,
     });
 
-    const created = await createWorldBookEntry({ scope: 'global', scopeId: '', bookName: ' 新的一本 ', entry: draftEntry() });
+    const created = await createWorldBookEntry({
+      scope: 'guild',
+      scopeId: GUILD,
+      bookName: ' 新的一本 ',
+      entry: draftEntry(),
+    });
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0].path).toBe('/api/world-book/entry');
-    expect(calls[0].init.method).toBe('POST');
-    expect((calls[0].init.headers as Record<string, string>)['content-type']).toBe('application/json');
-    const body = bodyOf(calls[0]);
-    expect(body.scope).toBe('global');
-    expect(body.scopeId).toBe('');
-    expect(body.bookName).toBe('新的一本');
-    expect((body.entry as Record<string, unknown>).id).toBe(0);
-    expect((body.entry as Record<string, unknown>).content).toBe('欢迎来到这个世界。');
-    // 回执里的 id 由后端给，前端照抄；书名与 createdBook 一并解析出来。
-    expect(created.entry.id).toBe(7);
-    expect(created.name).toBe('新的一本');
-    expect(created.entryCount).toBe(1);
+    expect(bodyOf(calls[0])).toEqual({
+      scope: 'guild',
+      scopeId: GUILD,
+      bookName: '新的一本',
+      entry: draftEntry(),
+    });
+    expect(created.bookId).toBe(BOOK_B);
     expect(created.createdBook).toBe(true);
   });
 
-  it('书名空白 / 不传时发 null：这一层已经有书就别让后端收到空串', async () => {
-    const calls = stubFetch({ entry: { ...draftEntry(), id: 9 }, name: '旧书', entryCount: 2, importedAt: '', createdBook: false });
+  it('这一层还没有书：bookName 不传时发 null，由后端报 BAD_BOOK_NAME', async () => {
+    const calls = stubFetch({
+      entry: { ...draftEntry(), id: 9 },
+      bookId: BOOK_B,
+      name: '旧书',
+      entryCount: 2,
+      importedAt: '',
+      createdBook: false,
+    });
 
-    await createWorldBookEntry({ scope: 'guild', scopeId: GUILD, bookName: '   ', entry: draftEntry() });
-    await createWorldBookEntry({ scope: 'guild', scopeId: GUILD, entry: draftEntry() });
+    await createWorldBookEntry({ scope: 'global', scopeId: '', bookName: '   ', entry: draftEntry() });
+    await createWorldBookEntry({ scope: 'global', scopeId: '', entry: draftEntry() });
 
     expect(calls).toHaveLength(2);
     expect(bodyOf(calls[0]).bookName).toBe(null);
     expect(bodyOf(calls[1]).bookName).toBe(null);
-    expect(bodyOf(calls[0]).scope).toBe('guild');
-    expect(bodyOf(calls[0]).scopeId).toBe(GUILD);
   });
 
   it('失败：BAD_BOOK_NAME 翻成页面统一那句', async () => {
@@ -126,23 +261,23 @@ describe('web 侧世界书新建（POST /api/world-book/entry）', () => {
   });
 });
 
-describe('web 侧世界书删除（DELETE /api/world-book/entry）', () => {
-  it('请求体是 { scope, scopeId, id }，回执带 entryCount / removedBook', async () => {
+describe('web 侧世界书删除条目（DELETE /api/world-book/entry）', () => {
+  it('请求体是 { bookId, id }，回执带 entryCount / removedBook', async () => {
     const calls = stubFetch({ ok: true, entryCount: 0, removedBook: true });
 
-    const result = await deleteWorldBookEntry({ scope: 'guild', scopeId: GUILD, id: 3 });
+    const result = await deleteWorldBookEntry({ bookId: BOOK_B, id: 3 });
 
     expect(calls).toHaveLength(1);
     expect(calls[0].path).toBe('/api/world-book/entry');
     expect(calls[0].init.method).toBe('DELETE');
-    expect(bodyOf(calls[0])).toEqual({ scope: 'guild', scopeId: GUILD, id: 3 });
+    expect(bodyOf(calls[0])).toEqual({ bookId: BOOK_B, id: 3 });
     expect(result).toEqual({ ok: true, entryCount: 0, removedBook: true });
   });
 
   it('删中间一条：removedBook false 原样透传', async () => {
     stubFetch({ ok: true, entryCount: 2, removedBook: false });
 
-    const result = await deleteWorldBookEntry({ scope: 'global', scopeId: '', id: 1 });
+    const result = await deleteWorldBookEntry({ bookId: BOOK_A, id: 1 });
 
     expect(result.removedBook).toBe(false);
     expect(result.entryCount).toBe(2);

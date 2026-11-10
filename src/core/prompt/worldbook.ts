@@ -56,6 +56,8 @@ export interface WorldBook {
   entries: WorldEntry[];
   ignored: WorldIgnored[];
   warnings: string[];
+  /** 下一次手动新建该给什么 id：只增不减，删掉最大号再新建也不复用（粘性/冷却按 entryId 记账） */
+  nextEntryId?: number;
 }
 
 export type WorldBookParseResult =
@@ -64,21 +66,30 @@ export type WorldBookParseResult =
 
 /** 落库后的一本世界书：entryCount 冗余存一份，列表页不必反序列化整本书 */
 export interface WorldBookRecord extends ScopedKey {
+  /** 一本一个稳定 id：条目 id 只在书内唯一，粘性/冷却记账靠它把两本书的同号条目分开 */
+  bookId: string;
   name: string;
   book: WorldBook;
   entryCount: number;
   importedAt: string;
+  /** 整本开关：停用只影响装配，书与条目都留在库里，后台随时能再开 */
+  enabled: boolean;
 }
 
 export interface WorldBookStore {
-  get(key: ScopedKey): Promise<WorldBookRecord | null>;
   list(): Promise<WorldBookRecord[]>;
-  put(input: { scope: Scope; scopeId: string; name: string; book: WorldBook }): Promise<WorldBookRecord>;
-  remove(key: ScopedKey): Promise<void>;
+  /** 按 bookId 单取一本：单条编辑/删除只需要这一本，不必把整层甚至整个库反序列化 */
+  get(bookId: string): Promise<WorldBookRecord | null>;
+  create(input: { scope: Scope; scopeId: string; name: string; book: WorldBook }): Promise<WorldBookRecord>;
+  /** 局部更新：没给的字段保持原值；bookId 不存在回 null，由调用方决定 404 */
+  update(input: { bookId: string; name?: string; book?: WorldBook; enabled?: boolean }): Promise<WorldBookRecord | null>;
+  remove(bookId: string): Promise<void>;
 }
 
 /** 一条条目的粘性/冷却记账：轮次口径 = 该频道已存消息条数，落库才能活过重启 */
 export interface WorldEntryState {
+  /** 这条账属于哪本书：两本书都有 id=1 的条目，光靠 entryId 会串 */
+  bookId: string;
   entryId: number;
   /** 到这一轮（含）仍然有效；0 表示没有粘性 */
   stickyUntil: number;
@@ -94,7 +105,6 @@ export interface WorldBookStateStore {
 
 export const WORLD_SCAN_DEPTH_DEFAULT = 4;
 export const WORLD_SCAN_DEPTH_MAX = 20;
-export const WORLD_BLOCK_MAX_CHARS = 4000;
 /** 与 injection.ts 的 INJECTION_DEPTH_MAX 同口径：插得比这更深已经没有意义 */
 export const WORLD_DEPTH_MAX = 50;
 export const WORLD_PROBABILITY_DEFAULT = 100;
@@ -420,26 +430,42 @@ export function normalizeWorldEntry(entry: WorldEntry): WorldEntry {
 
 export function normalizeWorldBook(book: WorldBook): WorldBook {
   const raw = book as Partial<WorldBook>;
+  const nextEntryId = typeof raw.nextEntryId === 'number' && Number.isFinite(raw.nextEntryId) && raw.nextEntryId > 0 ? Math.trunc(raw.nextEntryId) : null;
   return {
     name: typeof raw.name === 'string' ? raw.name : '',
     entries: Array.isArray(raw.entries) ? raw.entries.map(normalizeWorldEntry) : [],
     ignored: Array.isArray(raw.ignored) ? raw.ignored : [],
     warnings: Array.isArray(raw.warnings) ? raw.warnings : [],
+    ...(nextEntryId === null ? {} : { nextEntryId }),
   };
 }
 
 /**
- * 三层整本覆盖：只要某层有书就用它，不做条目级合并——
- * 半本上层 + 半本下层拼出来的设定没人能预期。
+ * 层间仍是整层互斥（channel > guild > global），层内则是「所有启用的书一起上」：
+ * 传进来的三组已经按层筛过（同一层 + enabled），哪层非空就用哪一层，全空等于没配世界书。
  */
-export function resolveWorldBook(
-  channel: WorldBookRecord | null,
-  guild: WorldBookRecord | null,
-  global: WorldBookRecord | null,
-): WorldBookRecord | null {
-  if (channel !== null) return channel;
-  if (guild !== null) return guild;
-  return global;
+export function resolveWorldBooks(
+  channel: readonly WorldBookRecord[],
+  guild: readonly WorldBookRecord[],
+  global: readonly WorldBookRecord[],
+): WorldBookRecord[] {
+  if (channel.length > 0) return [...channel];
+  if (guild.length > 0) return [...guild];
+  return [...global];
+}
+
+/**
+ * 同一层导入同名书时自动让路：不做「同名覆盖」（导入永远新增一本），
+ * 名字后缀只为了后台能分辨，不参与任何匹配。
+ */
+export function uniqueWorldBookName(existing: readonly string[], wanted: string): string {
+  const base = wanted.trim() === '' ? '未命名世界书' : wanted.trim();
+  if (!existing.includes(base)) return base;
+  for (let index = 2; index <= 999; index += 1) {
+    const candidate = base + '（' + String(index) + '）';
+    if (!existing.includes(candidate)) return candidate;
+  }
+  return base + '（' + String(Date.now()) + '）';
 }
 
 function isWordChar(char: string): boolean {
@@ -507,11 +533,12 @@ function matchesEntry(entry: WorldEntry, window: string): boolean {
 export interface WorldSkip {
   id: number;
   name: string;
-  reason: 'delay' | 'cooldown' | 'probability' | 'group' | 'budget';
+  reason: 'delay' | 'cooldown' | 'probability' | 'group';
 }
 
+/** 一本书的取舍结果；多本同时启用时由 mergeWorldSelections 拼成一份 */
 export interface WorldSelection {
-  /** 最终入选的条目，已按 order/id 升序，且已过全局字数预算 */
+  /** 最终入选的条目，已按 order/id 升序（不设字数上限，见 §79） */
   entries: WorldEntry[];
   /** 同 entries，按插入位置分好，供装配处各自成段 */
   byPosition: Record<WorldPosition, WorldEntry[]>;
@@ -522,9 +549,11 @@ export interface WorldSelection {
 }
 
 export interface WorldSelectOptions {
+  /** 这本书的 id：产出的粘性/冷却记账要带上它，两本书的同号条目才不会串 */
+  bookId?: string;
   /** 书级默认扫描深度；条目自己的 scanDepth 优先 */
   scanDepth?: number;
-  /** 上一轮落库的粘性/冷却 */
+  /** 上一轮落库的粘性/冷却（调用方按 bookId 先筛好，这里再筛一次也不贵） */
   state?: readonly WorldEntryState[];
   /** 当前轮次 = 该频道已存消息条数；缺省 0（第一轮） */
   turn?: number;
@@ -545,9 +574,9 @@ function rollProbability(entry: WorldEntry, random: () => number): boolean {
 }
 
 /**
- * 选条目，顺序与酒馆一致：
- * 关键词/常驻 → 延迟 → 粘性（直接续命）→ 冷却 → 概率 → 包含组取权重最高 → order/id 升序 → 4000 字预算。
- * 掷骰与分组都在预算之前，预算只决定「最后塞不塞得下」。
+ * 选一本书里的条目，顺序与酒馆一致：
+ * 关键词/常驻 → 延迟 → 粘性（直接续命）→ 冷却 → 概率 → 包含组取权重最高 → order/id 升序。
+ * 不设字数上限（§79）：入选的条目全部注入，挤占上下文由预设与历史条数共同决定。
  */
 export function selectWorldEntries(
   book: WorldBook,
@@ -557,8 +586,12 @@ export function selectWorldEntries(
   const defaultDepth = clampScanDepth(options.scanDepth);
   const turn = Math.max(0, Math.floor(options.turn ?? 0));
   const random = options.random ?? Math.random;
+  const bookId = options.bookId ?? '';
   const previous = new Map<number, WorldEntryState>();
-  for (const row of options.state ?? []) previous.set(row.entryId, row);
+  for (const row of options.state ?? []) {
+    if (row.bookId !== bookId) continue;
+    previous.set(row.entryId, row);
+  }
 
   const windows = new Map<number, string>();
   const windowFor = (depth: number): string => {
@@ -613,20 +646,10 @@ export function selectWorldEntries(
   }
   winners.sort((left, right) => left.order - right.order || left.id - right.id);
 
-  const entries: WorldEntry[] = [];
+  // 正文为空等于没写：整条丢，但不记 skip（它不是被规则挡下的）
+  const entries = winners.filter((entry) => entry.content.trim() !== '');
   let used = 0;
-  for (const entry of winners) {
-    const body = entry.content.trim();
-    if (body === '') continue;
-    // 连接符也算预算：保证 buildWorldBlock 的产物本身不越过上限
-    const cost = entries.length === 0 ? body.length : body.length + 2;
-    if (used + cost > WORLD_BLOCK_MAX_CHARS) {
-      skipped.push({ id: entry.id, name: entry.name, reason: 'budget' });
-      continue;
-    }
-    used += cost;
-    entries.push(entry);
-  }
+  for (const entry of entries) used += entry.content.trim().length + (used === 0 ? 0 : 2);
 
   // 记账：没入选的条目只要粘性/冷却还没过期就保留原行，否则下一轮就漏挡了
   const next = new Map<number, WorldEntryState>();
@@ -636,14 +659,58 @@ export function selectWorldEntries(
   for (const entry of entries) {
     const stickyUntil = entry.sticky > 0 ? turn + entry.sticky : 0;
     const cooldownUntil = entry.cooldown > 0 ? turn + entry.cooldown : 0;
-    if (stickyUntil > turn || cooldownUntil > turn) next.set(entry.id, { entryId: entry.id, stickyUntil, cooldownUntil });
-    else next.delete(entry.id);
+    if (stickyUntil > turn || cooldownUntil > turn) {
+      next.set(entry.id, { bookId, entryId: entry.id, stickyUntil, cooldownUntil });
+    } else {
+      next.delete(entry.id);
+    }
   }
 
   const byPosition = emptyByPosition();
   for (const entry of entries) byPosition[entry.position].push(entry);
 
   return { entries, byPosition, skipped, state: [...next.values()], usedChars: used };
+}
+
+/** 一本书的取舍结果，带上它的 id（排障日志与粘性/冷却记账都要能指回书） */
+export interface WorldBookPart {
+  bookId: string;
+  selection: WorldSelection;
+}
+
+export interface WorldSkipBook extends WorldSkip {
+  bookId: string;
+}
+
+/** 多本书拼起来之后的同一份选择：层内所有启用的书一起生效（§79） */
+export interface MergedWorldSelection {
+  byPosition: Record<WorldPosition, WorldEntry[]>;
+  skipped: WorldSkipBook[];
+  usedChars: number;
+}
+
+/**
+ * 合并同层多本书的取舍结果。组与概率都是按书各自算的（酒馆的包含组也是一本书内的概念），
+ * 这里只做拼接：每档位置内按 (order, 书序, id) 排，书序 = 传进来的顺序，保证同一份库每次渲染一致。
+ */
+export function mergeWorldSelections(parts: readonly WorldBookPart[]): MergedWorldSelection {
+  const byPosition = emptyByPosition();
+  const skipped: WorldSkipBook[] = [];
+  let usedChars = 0;
+  const ordered: { part: number; entry: WorldEntry }[] = [];
+  parts.forEach((part, index) => {
+    usedChars += part.selection.usedChars;
+    for (const skip of part.selection.skipped) skipped.push({ ...skip, bookId: part.bookId });
+    for (const entry of part.selection.entries) ordered.push({ part: index, entry });
+  });
+  ordered.sort(
+    (left, right) =>
+      left.entry.order - right.entry.order ||
+      left.part - right.part ||
+      left.entry.id - right.entry.id,
+  );
+  for (const item of ordered) byPosition[item.entry.position].push(item.entry);
+  return { byPosition, skipped, usedChars };
 }
 
 /**

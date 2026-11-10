@@ -184,8 +184,8 @@ interface Harness {
   reactionTemplateKeys: ScopedKey[];
   /** promptInjections.get 收到的每一层：没接线时为空 */
   injectionKeys: ScopedKey[];
-  /** worldBooks.get 收到的每一层：没接线时为空 */
-  worldBookKeys: ScopedKey[];
+  /** worldBooks.list 被调用的次数：没接线时为 0，接线后每轮一次（层内过滤不再查库） */
+  readonly worldBookListCalls: number;
 }
 
 function makeHarness(input: {
@@ -223,11 +223,11 @@ function makeHarness(input: {
     guild?: PromptInjectionConfig | null;
     global?: PromptInjectionConfig | null;
   };
-  /** 世界书三层配置；不给 = 没接线，三层都读不到、system 与接线前逐字一致 */
+  /** 世界书三层配置；一层可以给多本（数组），不给 = 没接线、system 与接线前逐字一致 */
   worldBooks?: {
-    channel?: WorldBookRecord | null;
-    guild?: WorldBookRecord | null;
-    global?: WorldBookRecord | null;
+    channel?: WorldBookRecord | WorldBookRecord[] | null;
+    guild?: WorldBookRecord | WorldBookRecord[] | null;
+    global?: WorldBookRecord | WorldBookRecord[] | null;
   };
   /** 世界书粘性/冷却状态库；不给 = 没接线，一次都不读写 */
   worldBookState?: WorldBookStateStore;
@@ -247,7 +247,7 @@ function makeHarness(input: {
   const bodyEmojiGuideKeys: ScopedKey[] = [];
   const reactionTemplateKeys: ScopedKey[] = [];
   const injectionKeys: ScopedKey[] = [];
-  const worldBookKeys: ScopedKey[] = [];
+  let worldBookListCalls = 0;
   const state: ChatMessage[] = [...(input.history ?? [])];
 
   const unused = (id: ProviderId): LlmProvider => failingProvider(id, '未被选中的 provider 不应被调用');
@@ -401,22 +401,41 @@ function makeHarness(input: {
     ...(input.worldBooks === undefined
       ? {}
       : {
-          worldBooks: {
-            async get(key: ScopedKey): Promise<WorldBookRecord | null> {
-              worldBookKeys.push(key);
+          // 真实仓储一次 list() 回三层全部的书，层内过滤由 core 自己做；这个假库只负责「库里有什么」
+          worldBooks: (() => {
+            const all = (): WorldBookRecord[] => {
               const configured = input.worldBooks ?? {};
-              if (key.scope === 'channel') return configured.channel ?? null;
-              if (key.scope === 'guild') return configured.guild ?? null;
-              return configured.global ?? null;
-            },
-            async list() {
-              return [];
-            },
-            async put(cfg) {
-              return { ...cfg, entryCount: cfg.book.entries.length, importedAt: FIXED_NOW };
-            },
-            async remove() {},
-          },
+              const out: WorldBookRecord[] = [];
+              for (const slot of [configured.channel, configured.guild, configured.global]) {
+                if (slot === undefined || slot === null) continue;
+                if (Array.isArray(slot)) out.push(...slot);
+                else out.push(slot);
+              }
+              return out;
+            };
+            return {
+              async list(): Promise<WorldBookRecord[]> {
+                worldBookListCalls += 1;
+                return all();
+              },
+              async get(bookId: string): Promise<WorldBookRecord | null> {
+                return all().find((record) => record.bookId === bookId) ?? null;
+              },
+              async create(cfg): Promise<WorldBookRecord> {
+                return {
+                  ...cfg,
+                  bookId: 'created-book',
+                  entryCount: cfg.book.entries.length,
+                  importedAt: FIXED_NOW,
+                  enabled: true,
+                };
+              },
+              async update(): Promise<WorldBookRecord | null> {
+                return null;
+              },
+              async remove() {},
+            };
+          })(),
         }),
     ...(input.worldBookState === undefined ? {} : { worldBookState: input.worldBookState }),
     ...(input.promptInjections === undefined
@@ -487,7 +506,9 @@ function makeHarness(input: {
     bodyEmojiGuideKeys,
     reactionTemplateKeys,
     injectionKeys,
-    worldBookKeys,
+    get worldBookListCalls() {
+      return worldBookListCalls;
+    },
   };
 }
 
@@ -3065,19 +3086,35 @@ describe('世界书进 system', () => {
   }
 
   function record(content: string, overrides: Partial<WorldBookRecord> = {}): WorldBookRecord {
+    const scope = overrides.scope ?? 'global';
+    const scopeId = overrides.scopeId ?? '';
     const book: WorldBook = { name: '测试书', entries: [entry({ content })], ignored: [], warnings: [] };
-    return { scope: 'global', scopeId: '', name: '测试书', book, entryCount: 1, importedAt: FIXED_NOW, ...overrides };
+    return {
+      bookId: scope + ':' + scopeId,
+      scope,
+      scopeId,
+      name: '测试书',
+      book,
+      entryCount: 1,
+      importedAt: FIXED_NOW,
+      enabled: true,
+      ...overrides,
+    };
   }
 
   function bookOf(entries: WorldEntry[], overrides: Partial<WorldBookRecord> = {}): WorldBookRecord {
+    const scope = overrides.scope ?? 'global';
+    const scopeId = overrides.scopeId ?? '';
     const book: WorldBook = { name: '测试书', entries, ignored: [], warnings: [] };
     return {
-      scope: 'global',
-      scopeId: '',
+      bookId: scope + ':' + scopeId,
+      scope,
+      scopeId,
       name: '测试书',
       book,
       entryCount: entries.length,
       importedAt: FIXED_NOW,
+      enabled: true,
       ...overrides,
     };
   }
@@ -3117,17 +3154,13 @@ describe('世界书进 system', () => {
   it('没接线时 system 与改动前逐字相同，且一次世界书都不查', async () => {
     const { system, harness } = await runSystem({});
     expect(system).toBe(BASE_SYSTEM);
-    expect(harness.worldBookKeys).toEqual([]);
+    expect(harness.worldBookListCalls).toBe(0);
   });
 
-  it('接线但三层都没书 → 仍然逐字相同（不多出空行）', async () => {
+  it('接线但三层都没书 → 仍然逐字相同（一次 list 就够，不按层各查一次）', async () => {
     const { system, harness } = await runSystem({ worldBooks: { channel: null, guild: null, global: null } });
     expect(system).toBe(BASE_SYSTEM);
-    expect(harness.worldBookKeys).toEqual([
-      { scope: 'channel', scopeId: 'c1' },
-      { scope: 'guild', scopeId: 'g1' },
-      { scope: 'global', scopeId: '' },
-    ]);
+    expect(harness.worldBookListCalls).toBe(1);
   });
 
   it('有书但关键词没命中 → 仍然逐字相同', async () => {
@@ -3190,6 +3223,74 @@ describe('世界书进 system', () => {
     expect(system).toContain('公会书里写着龙。');
   });
 
+  it('同层两本都启用：两本的条目都进 system，按 order 跨书合并', async () => {
+    const late = bookOf([entry({ id: 0, name: '后', keys: ['龙'], content: '后写的。', order: 200 })], { bookId: 'book-late' });
+    const early = bookOf([entry({ id: 0, name: '前', keys: ['龙'], content: '先写的。', order: 10 })], { bookId: 'book-early' });
+
+    const { system } = await runSystem({ worldBooks: { global: [late, early] }, userText: '龙来了' });
+
+    // order 小的先写：书在库里的先后不决定条目顺序
+    expect(system).toBe('基本设定' + '\n\n' + platformHead(CTX, TODAY) + '\n\n【世界书】\n先写的。\n\n后写的。');
+  });
+
+  it('同层一本停用：只注入还开着的那本，停用的书一个字段都不进 prompt', async () => {
+    const off = bookOf([entry({ keys: ['龙'], content: '停用书里写着龙。' })], { bookId: 'book-off', enabled: false });
+    const on = bookOf([entry({ keys: ['龙'], content: '启用书里写着龙。' })], { bookId: 'book-on' });
+
+    const { system } = await runSystem({ worldBooks: { global: [off, on] }, userText: '龙来了' });
+
+    expect(system).toContain('启用书里写着龙。');
+    expect(system).not.toContain('停用书里写着龙。');
+  });
+
+  it('该层所有书都停用 → 整层算空，落到下一层', async () => {
+    const { system } = await runSystem({
+      worldBooks: {
+        channel: [
+          bookOf([entry({ keys: ['龙'], content: '频道书里写着龙。' })], {
+            scope: 'channel',
+            scopeId: 'c1',
+            name: '频道书',
+            enabled: false,
+          }),
+        ],
+        guild: [bookOf([entry({ keys: ['龙'], content: '公会书里写着龙。' })], { scope: 'guild', scopeId: 'g1', name: '公会书' })],
+      },
+      userText: '龙来了',
+    });
+
+    expect(system).toContain('公会书里写着龙。');
+    expect(system).not.toContain('频道书里写着龙。');
+  });
+
+  it('两本书各有一条 id=0：粘性记账按 bookId 分开，一本续命不带另一本', async () => {
+    const a = bookOf([entry({ id: 0, keys: ['龙'], content: 'A 书里写着龙。', sticky: 2 })], { bookId: 'book-a' });
+    const b = bookOf([entry({ id: 0, keys: ['龙'], content: 'B 书里写着龙。', sticky: 2 })], { bookId: 'book-b' });
+    // 只给 A 记过粘性：这一轮没有关键词，只有 A 该续命
+    const { store, save } = stateStore([{ bookId: 'book-a', entryId: 0, stickyUntil: 9, cooldownUntil: 0 }]);
+
+    const { system } = await runSystem({ worldBooks: { global: [a, b] }, worldBookState: store, userText: '今天天气不错' });
+
+    expect(system).toContain('A 书里写着龙。');
+    expect(system).not.toContain('B 书里写着龙。');
+    expect(save).toHaveBeenCalledWith('g1', 'c1', [{ bookId: 'book-a', entryId: 0, stickyUntil: 4, cooldownUntil: 0 }]);
+  });
+
+  it('同层两本各 id=0 都命中：写回两行记账，各自挂在自己的 bookId 下', async () => {
+    const a = bookOf([entry({ id: 0, keys: ['龙'], content: 'A 书里写着龙。', sticky: 2 })], { bookId: 'book-a' });
+    const b = bookOf([entry({ id: 0, keys: ['龙'], content: 'B 书里写着龙。', sticky: 2 })], { bookId: 'book-b' });
+    const { store, save } = stateStore([]);
+
+    const { system } = await runSystem({ worldBooks: { global: [a, b] }, worldBookState: store, userText: '龙来了' });
+
+    expect(system).toContain('A 书里写着龙。');
+    expect(system).toContain('B 书里写着龙。');
+    expect(save).toHaveBeenCalledWith('g1', 'c1', [
+      { bookId: 'book-a', entryId: 0, stickyUntil: 4, cooldownUntil: 0 },
+      { bookId: 'book-b', entryId: 0, stickyUntil: 4, cooldownUntil: 0 },
+    ]);
+  });
+
   it('世界书段不落库：append 仍然只有本轮用户消息与自己那句回复', async () => {
     const { harness } = await runSystem({ worldBooks: { global: record('龙住在山里。') }, userText: '龙来了' });
     const appended = (harness.appendCalls[0]?.messages ?? []).map((message) => message.content);
@@ -3240,8 +3341,8 @@ describe('世界书进 system', () => {
     expect(messages.some((message) => message.content.includes('【世界书】'))).toBe(false);
   });
 
-  it('粘性状态按 (guildId, channelId) 读进来，算完后原样写回去', async () => {
-    const target = bookOf([entry({ keys: ['龙'], sticky: 2 })]);
+  it('粘性状态按 (guildId, channelId) 读进来，算完后按 bookId 写回去', async () => {
+    const target = bookOf([entry({ keys: ['龙'], sticky: 2 })], { bookId: 'book-a' });
     const { store, load, save } = stateStore([]);
 
     const { system } = await runSystem({
@@ -3254,7 +3355,7 @@ describe('世界书进 system', () => {
     expect(load).toHaveBeenCalledTimes(1);
     expect(load).toHaveBeenCalledWith('g1', 'c1');
     expect(save).toHaveBeenCalledTimes(1);
-    expect(save).toHaveBeenCalledWith('g1', 'c1', [{ entryId: 0, stickyUntil: 4, cooldownUntil: 0 }]);
+    expect(save).toHaveBeenCalledWith('g1', 'c1', [{ bookId: 'book-a', entryId: 0, stickyUntil: 4, cooldownUntil: 0 }]);
   });
 
   it('state 与选择结果一致时不写库', async () => {
@@ -3290,7 +3391,7 @@ describe('世界书进 system', () => {
   });
 
   it('读库抛错也只 warn：按无状态继续，这一轮照样命中并写回', async () => {
-    const target = bookOf([entry({ keys: ['龙'], sticky: 2 })]);
+    const target = bookOf([entry({ keys: ['龙'], sticky: 2 })], { bookId: 'book-a' });
     const load = vi.fn(async () => {
       throw new Error('库挂了');
     });
@@ -3305,7 +3406,7 @@ describe('世界书进 system', () => {
 
       expect(system).toContain('【世界书】\n龙住在山里。');
       expect(warnings.lines.some((line) => line.includes('[chat] 读取世界书粘性/冷却失败'))).toBe(true);
-      expect(save).toHaveBeenCalledWith('g1', 'c1', [{ entryId: 0, stickyUntil: 4, cooldownUntil: 0 }]);
+      expect(save).toHaveBeenCalledWith('g1', 'c1', [{ bookId: 'book-a', entryId: 0, stickyUntil: 4, cooldownUntil: 0 }]);
     } finally {
       warnings.restore();
     }
@@ -3467,7 +3568,16 @@ describe('§55 上下文工具模式（contextTool）', () => {
       ],
       summary: '上次聊到电影',
       worldBooks: {
-        global: { scope: 'global', scopeId: '', name: '测试书', book, entryCount: 1, importedAt: FIXED_NOW },
+        global: {
+          bookId: 'book-1',
+          scope: 'global',
+          scopeId: '',
+          name: '测试书',
+          book,
+          entryCount: 1,
+          importedAt: FIXED_NOW,
+          enabled: true,
+        },
       },
       channelMemory: memoryConfig({ contextTool: true }),
     });
@@ -3527,7 +3637,16 @@ describe('§55 上下文工具模式（contextTool）', () => {
       routes: { global: ROUTE },
       prompts: { global: { segments: [segment('main', PRESET)] } },
       worldBooks: {
-        global: { scope: 'global', scopeId: '', name: '测试书', book, entryCount: 1, importedAt: FIXED_NOW },
+        global: {
+          bookId: 'book-1',
+          scope: 'global',
+          scopeId: '',
+          name: '测试书',
+          book,
+          entryCount: 1,
+          importedAt: FIXED_NOW,
+          enabled: true,
+        },
       },
       channelMemory: memoryConfig({ contextTool: true }),
     });
@@ -3589,7 +3708,16 @@ describe('§55 上下文工具模式（contextTool）', () => {
       },
       summary: '上次聊到电影',
       worldBooks: {
-        global: { scope: 'global', scopeId: '', name: '测试书', book, entryCount: 1, importedAt: FIXED_NOW },
+        global: {
+          bookId: 'book-1',
+          scope: 'global',
+          scopeId: '',
+          name: '测试书',
+          book,
+          entryCount: 1,
+          importedAt: FIXED_NOW,
+          enabled: true,
+        },
       },
       bodyEmojiGuides: {
         global: { scope: 'global', scopeId: '', prompt: '偶尔带 :laugh:，别每句都带', updatedAt: FIXED_NOW },

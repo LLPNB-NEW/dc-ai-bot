@@ -18,9 +18,11 @@ import { DEFAULT_PROMPT, resolvePrompt } from '../prompt/resolver';
 import { renderTemplate } from '../prompt/template';
 import {
   buildWorldBlock,
-  resolveWorldBook,
+  mergeWorldSelections,
+  resolveWorldBooks,
   selectWorldEntries,
   withWorldDepth,
+  type WorldBookPart,
   type WorldBookRecord,
   type WorldBookStateStore,
   type WorldBookStore,
@@ -541,13 +543,25 @@ export function renderVoiceHint(hint: boolean | undefined): string {
 /** 两份记账是否等价：相同就不写库，没有粘性/冷却的频道因此一次写都不发 */
 function sameWorldState(left: readonly WorldEntryState[], right: readonly WorldEntryState[]): boolean {
   if (left.length !== right.length) return false;
-  const byId = new Map<number, WorldEntryState>();
-  for (const row of left) byId.set(row.entryId, row);
+  // 键必须带 bookId：两本书都有 id=1 的条目，只按 entryId 比对会把两份账当成同一份
+  const byId = new Map<string, WorldEntryState>();
+  for (const row of left) byId.set(row.bookId + ':' + String(row.entryId), row);
   for (const row of right) {
-    const other = byId.get(row.entryId);
+    const other = byId.get(row.bookId + ':' + String(row.entryId));
     if (other === undefined || other.stickyUntil !== row.stickyUntil || other.cooldownUntil !== row.cooldownUntil) return false;
   }
   return true;
+}
+
+/** 排障行里的「注入几条/参与取舍几条」：位置分组各算各的，跳过的那批只在末尾合起来 */
+function worldCountText(selection: { byPosition: { beforeChar: unknown[]; afterChar: unknown[]; anTop: unknown[]; anBottom: unknown[]; atDepth: unknown[] }; skipped: unknown[] }): string {
+  const injected =
+    selection.byPosition.beforeChar.length +
+    selection.byPosition.afterChar.length +
+    selection.byPosition.anTop.length +
+    selection.byPosition.anBottom.length +
+    selection.byPosition.atDepth.length;
+  return String(injected) + '/' + String(injected + selection.skipped.length);
 }
 
 export function createChatService(deps: ChatServiceDeps): ChatService {
@@ -899,16 +913,16 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
   }
 
   /**
-   * 一层世界书：读失败只当这一层没有、落回上一层，绝不让这一轮回复失败。
-   * 没接线时不发这次查询，system 与接线前逐字一致。
+   * 世界书整表一次读回（三层加起来最多几十本），层内由 enabled 过滤。
+   * 读失败只当没有世界书，绝不让这一轮回复失败；没接线时不发这次查询，system 与接线前逐字一致。
    */
-  async function readWorldBook(scope: Scope, scopeId: string): Promise<WorldBookRecord | null> {
-    if (worldBooks === undefined) return null;
+  async function readWorldBooks(): Promise<WorldBookRecord[]> {
+    if (worldBooks === undefined) return [];
     try {
-      return await worldBooks.get({ scope, scopeId });
+      return await worldBooks.list();
     } catch (error) {
-      console.warn('[chat] 读取世界书失败，按上层继续：' + describeError(error));
-      return null;
+      console.warn('[chat] 读取世界书失败，按没有世界书继续：' + describeError(error));
+      return [];
     }
   }
 
@@ -1181,9 +1195,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
       channelInjection,
       guildInjection,
       globalInjection,
-      channelWorldBook,
-      guildWorldBook,
-      globalWorldBook,
+      worldBookRecords,
     ] = await Promise.all([
       prompts.get({ scope: 'channel', scopeId: ctx.channelId }),
       prompts.get({ scope: 'guild', scopeId: ctx.guildId }),
@@ -1206,9 +1218,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
       readInjection('channel', ctx.channelId),
       readInjection('guild', ctx.guildId),
       readInjection('global', ''),
-      readWorldBook('channel', ctx.channelId),
-      readWorldBook('guild', ctx.guildId),
-      readWorldBook('global', ''),
+      readWorldBooks(),
     ]);
 
     // 本轮真正生效的三个数字：频道行 > config > 代码默认；sum = 0 表示这一轮不自动总结
@@ -1240,8 +1250,14 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
     const template = resolveReactionTemplate(channelTemplate, guildTemplate, globalTemplate);
     // 深度注入（channel > guild > global）：空正文的那一层等于关着，三层都空 / 都没配就什么都不插
     const injection = resolveInjection(channelInjection, guildInjection, globalInjection);
-    // 世界书同样是三层整本覆盖（channel > guild > global）：命中哪层就整本用哪层，不做条目级合并
-    const worldBookHit: WorldBookRecord | null = resolveWorldBook(channelWorldBook, guildWorldBook, globalWorldBook);
+    // 世界书：层间仍是整层互斥（channel > guild > global），层内启用几本就用几本（§79）
+    const booksAt = (scope: Scope, scopeId: string): WorldBookRecord[] =>
+      worldBookRecords.filter((book) => book.enabled && book.scope === scope && book.scopeId === scopeId);
+    const worldBookHits: WorldBookRecord[] = resolveWorldBooks(
+      booksAt('channel', ctx.channelId),
+      booksAt('guild', ctx.guildId),
+      booksAt('global', ''),
+    );
     const routeHit = resolveRoute(channelRoute, guildRoute, globalRoute);
     if (!routeHit) throw new Error('NO_ROUTE_CONFIGURED');
     const route = routeHit.cfg;
@@ -1283,22 +1299,28 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
     // 轮次口径 = 该频道已存消息条数：粘性/冷却/延迟都按它记账，重启也只是从库里接着数
     const worldTurn = history.length;
     let worldStateRows: WorldEntryState[] = [];
-    if (worldBookHit !== null && worldBookState !== undefined) {
+    if (worldBookHits.length > 0 && worldBookState !== undefined) {
       try {
         worldStateRows = await worldBookState.load(ctx.guildId, ctx.channelId);
       } catch (error) {
         console.warn('[chat] 读取世界书粘性/冷却失败，按无状态继续：' + describeError(error));
       }
     }
-    // 命中的那本书先按关键词/概率/包含组选条目；没书时一次都不选，system 与旧版逐字相同
-    const worldSelection =
-      worldBookHit === null
-        ? null
-        : selectWorldEntries(worldBookHit.book, worldWindow, { state: worldStateRows, turn: worldTurn });
+    // 每本书各自选条目（包含组、概率、粘性都是书内概念），再拼成同一份选择；没书时一次都不选
+    const worldParts: WorldBookPart[] = worldBookHits.map((book) => ({
+      bookId: book.bookId,
+      selection: selectWorldEntries(book.book, worldWindow, {
+        bookId: book.bookId,
+        state: worldStateRows,
+        turn: worldTurn,
+      }),
+    }));
+    const worldSelection = worldParts.length === 0 ? null : mergeWorldSelections(worldParts);
     // 粘性/冷却的变化立刻落库：这一轮就算被上游打回，下一轮的记账也必须已经生效
-    if (worldSelection !== null && worldBookState !== undefined && !sameWorldState(worldStateRows, worldSelection.state)) {
+    const nextWorldState = worldParts.flatMap((part) => part.selection.state);
+    if (worldBookState !== undefined && !sameWorldState(worldStateRows, nextWorldState)) {
       try {
-        await worldBookState.save(ctx.guildId, ctx.channelId, worldSelection.state);
+        await worldBookState.save(ctx.guildId, ctx.channelId, nextWorldState);
       } catch (error) {
         console.warn('[chat] 写世界书粘性/冷却失败（不影响本轮回复）：' + describeError(error));
       }
@@ -1440,7 +1462,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
       ' guide=' + guide.scope +
       ' hist=' + String(historyMaxMessages) +
       ' sum=' + String(summaryEveryMessages) +
-      ' world=' + (worldSelection === null ? 'off' : String(worldSelection.entries.length) + '/' + String(worldSelection.entries.length + worldSelection.skipped.length)),
+      ' world=' + (worldSelection === null ? 'off' : worldCountText(worldSelection)),
     );
     const temperature = route.temperature ?? promptHit.cfg.temperature;
     // §55：这一模式照抄酒馆的 max_tokens；显式配过就尊重配置（路由 > 提示词层 > 65535）

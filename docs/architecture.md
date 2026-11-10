@@ -4081,86 +4081,93 @@ judge 的产出要过逐字校验，共有四种结局：
 
 排错步骤与回滚写在 `docs/operations.md` §33。
 
-## 51. 世界书（阶段三；2026-11-11 对齐酒馆五档）
+## 51. 世界书（阶段三；一层多本，2026-11-11）
 
-`preset-3` 起提示词里多了一层「世界书」：把 SillyTavern 的 lorebook 按 channel / guild / global 三层各存一本，每轮挑出命中的条目再拼进请求。2026-11-11 这版把酒馆的触发与插入口径补齐：位置（↑Char / ↓Char / ↑AN / ↓AN / @D 五档）、深度、role、顺序、触发概率、包含组、粘性 / 冷却 / 延迟、单条扫描深度，以及后台的逐条编辑。正文不再只拼成一段 `【世界书】`，而是按位置分四路插入，@D 走独立消息（§50）。解析与选择都在 `src/core/prompt/worldbook.ts`（677 行），装配在 `src/core/chat/service.ts`。没配置任何世界书时四路全为空串，system 与旧版逐字相同。
+> 本节写当前实现：一个频道 / 服务器 / 全局层可以存多本世界书，启用的同时参与装配。§77（五档触发）与 §78（后台新建/删除）是单本阶段的历史记录，凡与本节冲突以本节为准。
 
 ### 51.1 数据与存档
 
-- 迁移：`migrations/0029_world_books.sql`（11 行）建 `world_books(scope, scope_id, name, book_json, entry_count, imported_at)`，主键 `(scope, scope_id)`，`scope` 带 `CHECK` 三档（`global` / `guild` / `channel`）。一本书一格：`book_json` 存的是**解析后的规范化书本**（`WorldBook` 形状），不是酒馆原文；读侧 `toWorldBookRecord`（`src/workers/db/d1-repository.ts:382-403`）还要过一遍 `normalizeWorldBook`，老库缺的新字段在这里补默认。
-- 迁移：`migrations/0034_world_book_state.sql` 建 `world_book_state(guild_id, channel_id, entry_id, sticky_until, cooldown_until, updated_at)`，主键 `(guild_id, channel_id, entry_id)`——粘性 / 冷却的记账，与每轮的选择结果一一对应。
-- 类型（`src/core/prompt/worldbook.ts`）：`WorldPosition` `:4`、`WORLD_POSITIONS` `:6`、`WorldEntry` `:9`、`WorldIgnored` `:47`、`WorldBook` `:54`、`WorldBookParseResult` `:61`、`WorldBookRecord` `:66`、`WorldBookStore` `:73`、`WorldEntryState` `:81`、`WorldBookStateStore` `:90`。
-- 常量（`:95-101`）：`WORLD_SCAN_DEPTH_DEFAULT = 4`、`WORLD_SCAN_DEPTH_MAX = 20`、`WORLD_BLOCK_MAX_CHARS = 4000`、`WORLD_DEPTH_MAX = 50`、`WORLD_PROBABILITY_DEFAULT = 100`、`WORLD_GROUP_WEIGHT_DEFAULT = 100`。
-- 仓储：`src/workers/db/d1-repository.ts` 的 `worldBooks` `:1613-1663`（get / list / put 单行 upsert / remove）、`worldBookState` `:1671-1715`（`load` 按 `entry_id` 升序、非有限 id 与脏计时直接丢；`save` 一次 `nowIso()` 组出 `DELETE` + 逐条 `INSERT`，`await db.batch` 一批成事）；`DataLayer` 接口 `:725`、返回对象 `:2036`。
-- 清空频道（`conversations.clear` `:1065-1072`）现在是两条 `DELETE` 同批：`messages` 与 `world_book_state`——轮次从头数，粘性 / 冷却也要跟着失效。
-- 接线：`src/node/main.ts:182` 与 `src/workers/index.ts:214` 传 `worldBookState`；`src/workers/gateway/engine.ts:641` 靠 `...repos` 自动带上。
-- 迁移口径：`0034` 是第 34 个迁移；`vitest.config.ts:47` 把 `test/node.*.test.ts` 排除在主 vitest 之外，迁移用例要 `--config vitest.node.config.ts` 才算真跑过。
+一本书一行，主键是 `book_id`；同一层（`scope` + `scope_id`）可以有多行，靠 `enabled` 决定是否参与。
 
-### 51.2 解析与条目取舍
+- 表 `world_books`（`migrations/0035_world_books_multi.sql`）：`book_id TEXT PRIMARY KEY`、`scope TEXT CHECK IN ('global','guild','channel')`、`scope_id TEXT DEFAULT ''`、`name TEXT`、`book_json TEXT`、`entry_count INTEGER`、`enabled INTEGER DEFAULT 1`、`imported_at TEXT`；索引 `idx_world_books_layer (scope, scope_id)`。
+- 迁移保留老数据：旧行（原来每层主键就是 `scope||':'||scope_id`）原样搬进新表，`book_id` 沿用 `scope||':'||scope_id`；新书用 `crypto.randomUUID()`。
+- 粘性/冷却表 `world_book_state` 在 0035 里重建，主键 `(guild_id, channel_id, book_id, entry_id)`。旧记账无法判断属于哪一本，迁移直接清空。
+- 类型（`src/core/prompt/worldbook.ts`）：`WorldBookRecord`（:66，`bookId/enabled/scope/scopeId/name/book/entryCount/importedAt`）、`WorldBookStore`（:77，`list()` / `get(bookId)` / `create({scope,scopeId,name,book})` / `update({bookId,name?,book?,enabled?})` / `remove(bookId)`）、`WorldEntryState`（:88，首字段 `bookId`）、`WorldBookStateStore`（:99）。
+- 仓储（`src/workers/db/d1-repository.ts`）：`WORLD_BOOK_COLUMNS` :1620、`worldBooks` :1623（`list` :1624 按 `scope, scope_id, imported_at, book_id` 排；`get` :1639；`create` 生成 UUID；`update` 动态 SET 后回读；`remove` :1704 同一批删 `world_books` 与 `world_book_state`）；`toWorldBookRecord` :385（老行缺 `book_id` 时回退 `scope||':'||scope_id`，`enabled` 用 `Number(...) !== 0`）；`worldBookState` :1714（读写都带 `book_id`，空 `bookId` 的账行直接跳过）。
+- 清空频道（`conversations.clear`，:1076 起）把 `messages` 与 `world_book_state` 放同一批删：对话重新数轮次，粘性/冷却跟着失效。
+- 装配：`src/node/main.ts:182`、`src/workers/index.ts:214` 传 `worldBookState`，`src/workers/gateway/engine.ts:641` 靠 `...repos` 展开自动带上；`worldBooks` 走 DataLayer 原有字段。
 
-- `parseWorldBook`（`:315`）接受三种输入：酒馆单独导出的世界书 JSON、角色卡 V2 的 `character_book`（顶层与 `data.character_book` 都认）、带 `entries` 的对象。解析失败回 `BAD_WORLDBOOK` / `NO_WORLD_ENTRIES`（HTTP 400）。
-- 条目字段：原有 `id` / `name` / `keys` / `secondaryKeys` / `content` / `enabled` / `constant` / `selective` / `selectiveLogic` / `order` / `caseSensitive` / `wholeWords`，新增 `position` / `depth` / `role` / `probability` / `useProbability` / `group` / `groupWeight` / `sticky` / `cooldown` / `delay` / `scanDepth`（共 23 个字段）。
-- 位置：酒馆的 0/1/2/3/4 → `beforeChar`（↑Char）/ `afterChar`（↓Char）/ `anTop`（↑AN）/ `anBottom`（↓AN）/ `atDepth`（@D），`readWorldPosition` `:175`，缺省 `anTop`；`role` 0/1/2 → `system` / `user` / `assistant`（`readWorldRole` `:213`）。
-- 缺省与夹取：`depth` 缺省 4、夹 0..50；`probability` 缺省 100、夹 0..100，`useProbability` 缺省为 `probability < 100`；`groupWeight` 缺省 100、夹 0..100000；`sticky` / `cooldown` / `delay` 缺省 0；`scanDepth` 缺省 `null` = 用书级默认。
-- 导入时被跳过的条目进 `ignored`，`reason` 三档：`empty`（正文空）/ `noKeys`（非常驻却没有关键词）/ `disabled`；运行期另有五种跳过原因（`WorldSkip.reason` `:507`）：`delay` / `cooldown` / `probability` / `group` / `budget`。
-- 是否启用：`readFlag(item['enabled'], true) && !readFlag(item['disable'], false)`——`enabled` 缺省为真，`disable` 为真则关。
-- `normalizeWorldEntry`（`:401`）/ `normalizeWorldBook`（`:421`）给老库补默认：`position` 缺省 `anTop`，旧书仍按旧行为插在 AN 顶部。
+### 51.2 解析与条目
+
+导入接受角色卡 V2 的 `character_book`、裸 `{ "entries": ... }` 或 `{ "data": { "character_book": ... } }`（`parseWorldBook` :323）。每条 23 个字段，老库缺新字段由 `normalizeWorldEntry`（:409）/ `normalizeWorldBook`（:429）补默认。
+
+- 位置：`position` 0..4 → `beforeChar`（↑Char）/ `afterChar`（↓Char）/ `anTop`（↑AN）/ `anBottom`（↓AN）/ `atDepth`（@D）；缺省 `anTop`（`readWorldPosition` :183）。
+- 角色：`role` 0/1/2 → `system` / `user` / `assistant`（`readWorldRole` :221），只对 @D 生效。
+- 触发：`keys`、`secondaryKeys`、`selective`、`selectiveLogic`、`caseSensitive`、`wholeWords`、`constant`。
+- 节奏：`probability`（0..100，缺省 100）、`useProbability`、`sticky`、`cooldown`、`delay`、`scanDepth`（`null` = 用书级默认）。
+- 分组与排序：`group`、`groupWeight`、`order`。
+- 导入期忽略原因只有三种：`empty`（正文空）、`noKeys`（非常驻且没有主关键词）、`disabled`（条目 `enabled: false`）；运行期跳过原因见 51.3。
 
 ### 51.3 触发与装配
 
-- 取书：`resolveWorldBook`（`:435`）按 `channel > guild > global` 取第一本非空。
-- 扫描窗口：每条用 `scanDepth ?? 书级默认`（默认 4，上限 20）建窗口，窗口按深度缓存、用户文本用未署名原文。
-- 选择管线 `selectWorldEntries`（`:552`，返回 `WorldSelection` `:513`）按顺序过：`matchesEntry`（`:486`，constant 优先；其余大小写不敏感、`wholeWords` 按词边界、`selective` 配合 `secondaryKeys` 与 `selectiveLogic`）→ 粘性（`stickyUntil >= turn` 直接入选，不看关键词不掷骰）→ 冷却（记 `cooldown`）→ 延迟（`turn < delay` 记 `delay`）→ 概率（`useProbability` 且 `probability < 100` 才掷，0 记 `probability`）→ 包含组（同组按 `groupWeight` 降序、`order`、`id` 取第一条，其余记 `group`）→ 按 `order` / `id` 排序 → 4000 字预算（成本 = 正文长度 + 非首条 2 字符，放不下整条记 `budget`）→ `byPosition` 分组。
-- 记账回写：上一轮里 `stickyUntil > turn || cooldownUntil > turn` 的行先保留，再对入选条目写 `stickyUntil = sticky > 0 ? turn + sticky : 0`、`cooldownUntil = cooldown > 0 ? turn + cooldown : 0`（每轮滑动续期，与 ST 同口径），两者都过期就删行；`turn` 取 `history.length`。`src/core/chat/service.ts` 只在账本真的变了才 `save`（`sameWorldState` `:542`），读 / 写失败都只 warn、按无状态继续。
-- 四路插入：↑Char 拼 `system` 最前面（`worldHeadPart` `:1326`）、↓Char 在预设 `after` 段之后（`worldAfterPart` `:1327-1328`）、↑AN 仍是 `【世界书】` 块（`worldPart` `:1315`，集中在表情块之后）、↓AN 压在 `system` 最末（`worldBottomPart` `:1329`）；`buildWorldBlock`（`:669`）只负责 ↑AN 这一段。四路全空时 `legacySystem` 与旧版逐字相同。
-- @D（`withWorldDepth` `:653`）：按 `depth` 降序、`order`、`id` 逐条插进 messages，`at = Math.max(0, out.length - 1) - clamp(depth, 0, out.length - 1)`，也就是 **depth 0 = 紧接本轮用户消息之前**，与 §50 的深度注入（`src/core/prompt/injection.ts:52`）同口径。这条与 SillyTavern 差一位（ST 的 depth 0 是最后一条之后、紧贴下一次生成），是刻意偏离：同一个产品里两套 depth 语义会互相矛盾，而且尾随在 user 之后的 system 在部分上游 / 中继上不稳。
-- 上下文工具模式（§65）只走 `contextBody`：↑Char / ↓Char / ↑AN / ↓AN 依次进 body，@D 不进（`src/core/chat/service.ts:1395-1403`）。
+**层间互斥、层内并行。** `resolveWorldBooks(channel, guild, global)`（:443）按 `channel > guild > global` 找第一个「有启用书」的层，整层返回；这一层里 `enabled: false` 的书不参与，若整层都是停用书就继续往下一层找。层内每本书独立选条目，再合并：
+
+```text
+每本书：selectWorldEntries(book, window, { bookId, state, turn })
+        → 关键词 / 常驻 / 延迟 / 概率 / 粘性 / 冷却 / 包含组
+合并：  mergeWorldSelections(parts)
+        → 按 order、书在层内的顺序、entryId 排序；同一条正文出现在两本书里也各算一条，不去重
+```
+
+- 选择管线（`selectWorldEntries` :577）：每条按自己的 `scanDepth ?? 书级默认` 建扫描窗口（默认 4，上限 20）→ `constant` 直接入选 → 粘性期内直接入选、不看关键词不掷骰 → 冷却期跳过 → 轮次小于 `delay` 跳过 → 概率掷骰（只在 `useProbability` 且 `probability < 100` 时）→ 同 `group` 只留 `groupWeight` 最高的一条 → 按 `order` / `id` 排。
+- 跳过原因（`WorldSkip.reason`）四种：`delay` / `cooldown` / `probability` / `group`；旧版的 `budget` 已随字数上限一起删除。
+- 记账：粘性 `stickyUntil = turn + sticky`、冷却 `cooldownUntil = turn + cooldown`，键是 `(guildId, channelId, bookId, entryId)`；旧账行在过期前保留，过期后删除。删掉一本书连它的账行一起删；重新导入同一本书是新 `bookId`，粘性/冷却从零开始。
+- 装配：四档分别 `buildWorldBlock`（:732）成段——`beforeChar` 紧贴预设头之前、`afterChar` 紧贴预设头之后、`anTop` 进 system 的世界书段、`anBottom` 收在 system 末尾；@D 条目用 `withWorldDepth`（:716）逐条插进 messages，`at = Math.max(0, out.length - 1) - clamp(depth, 0, out.length - 1)`。
+- 没有世界书（或整层都停用且下面也没有）时四个位置都是空串，system 与没有这个功能时逐字相同。
+- 服务侧（`src/core/chat/service.ts`）：`worldBookState` :153 / :574；`sameWorldState` :544 用 `bookId + ':' + entryId` 作键；`readWorldBooks` :919 一次 `list()`，失败只 `warn` 后按没有世界书继续；`booksAt` :1254 与 `worldBookHits` :1256 做层选择；`worldParts` :1310 逐本选择；`worldSelection` :1318 合并；`nextWorldState` :1320 有变化才 `save`；`worldBlocks` :1329；`worldDepthEntries` :1335；`worldPart` :1337 / `worldHeadPart` :1348 / `worldAfterPart` :1349 / `worldBottomPart` :1351。排障日志的 `world=` 是本轮注入条数 / 参与选择条数（同一本书内计数，跨书相加）。
 
 ### 51.4 接口与错误码
 
-都在 `src/workers/http/app.ts`：
+全部挂在 `/api/world-book`，需要管理员鉴权；没接线仓储时回 501。
 
-- `GET /api/world-book`（`:1211-1254`）：`items` 带 `scope` / `scopeId` / `name` / `entryCount` / `importedAt`，条目摘要给出 22 个可编辑字段（`content` 不下发，另给 `chars`，按码点算）。
-- `POST /api/world-book/import`（`:1256`）：body `{scope, scopeId, book}`，**整本覆盖该层**，回 `entryCount` / `ignored` / `warnings` / `replaced`（`replaced` = 该层原条目数）。
-- `DELETE /api/world-book`（`:1288`）：`scope` 与 `scopeId` 走 **JSON body**，不是 query 参数。
-- `GET /api/world-book/entry`（`:1313-1329`）与 `PUT /api/world-book/entry`（`:1332-1363`）：按 `scope` / `scopeId` / `id` 读写单条；PUT 只换同 id 那一条（`book: { ...record.book, entries: record.book.entries.map(...) }`），其余条目与 `ignored` / `warnings` 原样。
-- `POST /api/world-book/entry`（`:1366`）：新建单条，body `{scope, scopeId, bookName, entry}`。条目 id 由服务端分配（本书现有 max + 1，删掉的 id **不复用**，免得粘性 / 冷却记账串到新条目上），请求里带的 id 被忽略（`readWorldEntryInput` 的 `{ requireId: false }`，`:632`）。这一层还没有书时必须给非空 `bookName`（trim 后 1..80 字，`WORLD_BOOK_NAME_MAX` `:608`），顺手建一本；书已存在时忽略 `bookName`、沿用原书名。回 `{entry, name, entryCount, importedAt, createdBook}`。
-- `DELETE /api/world-book/entry`（`:1408`）：body `{scope, scopeId, id}`（JSON body，与删除整层一致）。删到一条不剩时连整本书一起移除（该层回到「未导入」，不会留一本空书遮住上层），回 `{ok, entryCount, removedBook}`。
-- 校验（`WorldEntryInput` / `readWorldEntryInput` `:629`、`readBoundedWorldInt` `:620`、`readWorldKeyList` `:608`、`readWorldEntryId` `:749`）：`position` ∈ `WORLD_POSITIONS`、`role` ∈ `system` / `user` / `assistant`、`depth` 0..50、`probability` 0..100、`groupWeight` 0..100000、`scanDepth` 为 `null` 或 1..20、`sticky` / `cooldown` 0..10000、`delay` 0..100000、`keys` / `secondaryKeys` 为字符串数组、`name` / `content` trim 后非空、布尔项必须布尔。越界不夹取而是拒掉，`detail` 点名第一项不合格的字段。
-- 错误码：store 没接线 `501 WORLDBOOK_UNAVAILABLE`；`scope` 非法 `400 BAD_SCOPE`；字段不合格 `400 BAD_WORLD_ENTRY`；解析失败 `400 BAD_WORLDBOOK` / `400 NO_WORLD_ENTRIES`；空层新建没给书名 `400 BAD_BOOK_NAME`；层或条目不存在 `404 WORLD_BOOK_NOT_FOUND` / `404 WORLD_ENTRY_NOT_FOUND`。PUT 与 POST 都先校验后查库（400 比 404 好定位）。
-- 后台：`web/src/pages/PromptsPage.tsx` 的「世界书」卡片 `:2475-2560`，「+ 新建条目」入口 `worldbook-entry-actions` `:2547`，条目摘要表 `renderWorldBookEntries` `:1535-1598`（只列前 50 行，`WORLD_BOOK_ROWS_LIMIT` `:210`），「操作」列「编辑」/「删除」`:1574`，展开式表单 `renderWorldBookEditor` `:1603-1950`（22 个控件覆盖契约全部字段，新建且这一层没有书时多一个必填书名栏 `:1654`，`depth` 只在 @D 时可编辑，`scanDepth` 留空 = 书级默认）。处理函数：`resetWorldBookEdit` `:1350`、`openWorldBookCreate` `:1369`、`openWorldBookEdit` `:1389`、`removeWorldBookEntry` `:1320`、`saveWorldBookForm` `:1432`、`updateWorldBookDraft` `:1421`，新建默认草稿 `newWorldEntryDraft` `:319`，行内校验 `buildWorldEntry` `:369`；并发用 `worldBookEditEpoch` ref 防串（`:571`）。接口封装 `web/src/api.ts`：`WorldBookEntry` `:3088`、`WorldBookEntrySummary` `:3123`、`WORLD_BOOK_NAME_MAX` `:3082`、`fetchWorldBookEntry` `:3404`、`saveWorldBookEntry` `:3419`、`createWorldBookEntry` `:3445`、`deleteWorldBookEntry` `:3474`、`describeWorldBookEntryError` `:3515`；样式 `web/src/styles.css:1488-1670`。
+| 方法与路径 | 语义 |
+| --- | --- |
+| `GET /api/world-book` :1264 | 回 `{ items: [{ scope, scopeId, bookId, name, enabled, entryCount, importedAt, entries }] }`；`entries` 是这本全部条目的摘要（不含正文，`chars` 按码点算） |
+| `POST /api/world-book/import` :1283 | 永远 **新增一本**，不覆盖同层旧书；重名用 `uniqueWorldBookName`（:457）加「（2）」…「（999）」；回 `{ scope, scopeId, bookId, name, entryCount, ignored, warnings, layerCount }` |
+| `PATCH /api/world-book` :1326 | body `{ bookId, enabled }`，只切这一本的开关，回 `{ bookId, enabled }` |
+| `DELETE /api/world-book` :1313 | body `{ bookId }`，删这一本，同层其它书不动 |
+| `GET /api/world-book/entry` :1342 | query `bookId` + `id`，回单条完整正文 |
+| `PUT /api/world-book/entry` :1360 | body `{ bookId, entry }`，整条替换，其余条目与 `ignored`/`warnings` 原样 |
+| `POST /api/world-book/entry` :1392 | body 带 `bookId` 时直接往这本里加：id 由书里的 `nextEntryId` 计数器给出（只增不减，删掉最大号也不复用；老书没有计数器时取 `max + 1`）。不带 `bookId` 时按 `{ scope, scopeId, bookName, entry }` 新建一本并把这条写进去 |
+| `DELETE /api/world-book/entry` :1459 | body `{ bookId, id }`；删掉最后一条时整本移除，回 `removedBook: true` |
+
+错误码：`501 WORLDBOOK_UNAVAILABLE`；`400 BAD_SCOPE` / `BAD_WORLD_ENTRY`（`detail` 逐项点名）/ `BAD_BOOK_NAME` / `BAD_BOOK_ID` / `BAD_BOOK_ENABLED`；`404 WORLD_BOOK_NOT_FOUND` / `WORLD_ENTRY_NOT_FOUND`。PUT 与 POST 都先校验形状再查库（400 比 404 好定位）。
+
+后台（`web/src/pages/PromptsPage.tsx`）：每层列出全部书，一行一本，带启用勾选、条目数、导入时间、「+ 新建条目」「删除本书」（卡片 :2545，空层 :2609，列表 :2625）；展开一本才显示条目表（:1602）与编辑表单（:1668）。状态与动作：`worldBookList` :1181、`toggleWorldBook` :1309、`removeWorldBook` :1332、`removeWorldBookEntry` :1361、`describeWorldBookOutcome` :230；样式 `web/src/styles.css:1671-1760`。前端接口封装 `web/src/api.ts`：`WorldBook` :3088、`WorldBookImportResult` :3150、`fetchWorldBook` :3351、`importWorldBook` :3366、`deleteWorldBook` :3401、`updateWorldBookEnabled` :3406、`fetchWorldBookEntry` :3423、`saveWorldBookEntry` :3437、`createWorldBookEntry` :3463、`deleteWorldBookEntry` :3501、`describeWorldBookEntryError` :3537。
 
 ### 51.5 限制与已知偏离
 
-①只有关键词 / 常驻触发，没有向量检索、没有递归触发；②命中块总量仍 4000 字符，超出的条目静默不进块（记 `budget`）；③一本书整层覆盖：导入仍会清掉这一层手工新建的条目；单条可以改、可以新建、可以删除，删掉最后一条连书一起移除；④概率用 `random()`，测试通过 `WorldSelectOptions.random` 注入；⑤粘性 / 冷却按 `(guild, channel, entryId)` 记账，换层重导同一本书时 id 相同的条目会继承旧账；⑥@D 的 depth 比 SillyTavern 差一位（见 51.3，刻意偏离）；⑦后台条目表只列前 50 行。
+1. **层间仍是互斥的**：频道层只要有一本启用的书，服务器层与全局层就完全不参与——不是把三层加起来。酒馆的 global 角色世界书与聊天世界书会同时生效，这里没有做那种叠加。
+2. **没有总字数上限**：旧版 4000 字的注入预算已按需求取消；单条正文也不截断，条目太长的直接进 prompt。上下文压力全靠模型自己的窗口。
+3. **导入永远是新增**：想替换同层的旧书得先删掉旧的；重名不会覆盖，只会得到「（2）」。
+4. **@D 的 depth 比酒馆差一位**：这里 `depth = 0` 落在本轮用户消息之前，与 `src/core/prompt/injection.ts:52` 的深度注入同口径；酒馆 `depth = 0` 是最后一条之后。刻意偏离，避免尾随 system 消息。
+5. 没有递归扫描、向量检索、按书覆盖扫描深度；扫描深度是逐条/书级默认值。
+6. 粘性/冷却按 `bookId + entryId` 记账：删掉再导入同一本书算新书，状态清零；同一本书内条目 id 只增不减（计数器存在 `book_json.nextEntryId`），删过的号不会再发给新条目，所以不会串账。
+7. 后台列表回每本全部条目的摘要，正文只在编辑单条时单独取。
 
 ### 51.6 代码地图
 
-| 位置 | 内容 |
+| 关注点 | 位置 |
 | --- | --- |
-| `src/core/prompt/worldbook.ts:4-101` | 类型与常量：五档位置 / 条目 / 书本 / 存档 / 两个仓储端口 / 六个常量 |
-| `src/core/prompt/worldbook.ts:175` / `:213` | `readWorldPosition` / `readWorldRole`，酒馆数字映射中文标签 |
-| `src/core/prompt/worldbook.ts:315` | `parseWorldBook`，接受世界书 JSON、`character_book`、带 `entries` 的对象 |
-| `src/core/prompt/worldbook.ts:401` / `:421` / `:435` | `normalizeWorldEntry` / `normalizeWorldBook` / `resolveWorldBook`（channel > guild > global） |
-| `src/core/prompt/worldbook.ts:486` / `:552` | `matchesEntry` / `selectWorldEntries`：粘性 → 冷却 → 延迟 → 概率 → 组 → 排序 → 预算 → 分组 |
-| `src/core/prompt/worldbook.ts:507` / `:513` / `:524` | `WorldSkip` / `WorldSelection` / `WorldSelectOptions` |
-| `src/core/prompt/worldbook.ts:653` / `:669` | `withWorldDepth`（@D 插 message）/ `buildWorldBlock`（↑AN 拼 `【世界书】`） |
-| `migrations/0029_world_books.sql:3` | `world_books` 建表，主键 `(scope, scope_id)` |
-| `migrations/0034_world_book_state.sql` | `world_book_state` 建表，主键 `(guild_id, channel_id, entry_id)` |
-| `src/workers/db/d1-repository.ts:382-403` | `toWorldBookRecord`：读侧 `normalizeWorldBook` |
-| `src/workers/db/d1-repository.ts:1613-1663` / `:1671-1715` | `worldBooks` / `worldBookState` 两个仓储 |
-| `src/workers/db/d1-repository.ts:1065-1072` | `conversations.clear`：`messages` 与 `world_book_state` 同批删 |
-| `src/node/main.ts:182` / `src/workers/index.ts:214` | 装配 `worldBookState: data.worldBookState` |
-| `src/core/chat/service.ts:151` / `:542` / `:560` | deps 可选 `worldBookState` / `sameWorldState` / 解构 |
-| `src/core/chat/service.ts:1284-1329` | 轮次 / 读账 / 选择 / 写账 / 四路分块 / 各段拼装 |
-| `src/core/chat/service.ts:1389` / `:1395-1403` | `withWorldDepth` 接在 messages 上 / `contextBody` 四路插入 |
-| `src/workers/http/app.ts:1211` / `:1256` / `:1288` / `:1302` / `:1321` | 列表 / 整本导入 / 删除 / 单条读 / 单条写 |
-| `src/workers/http/app.ts:605-755` | 单条校验 helper（位置 / role / 数值边界 / 关键词） |
-| `web/src/api.ts:3077-3117` / `:3398` / `:3413` / `:3447` | 类型与常量 / `fetchWorldBookEntry` / `saveWorldBookEntry` / 错误文案 |
-| `web/src/pages/PromptsPage.tsx:1410-1465` / `:1470-1800` / `:2307-2432` | 条目摘要表 / 编辑表单 / 「世界书」卡片 |
-| `web/src/styles.css:1488-1642` | `.page.prompts .worldbook-*` |
-
-排错步骤与回滚写在 `docs/operations.md` §34。
+| 类型、常量、解析、规范化 | `src/core/prompt/worldbook.ts:4-110`、:323、:409-429 |
+| 层选择、重名 | `src/core/prompt/worldbook.ts:443`、:457 |
+| 单本选择、合并、@D、成段 | `:577`、`:692`、`:716`、`:732` |
+| 聊天装配与状态读写 | `src/core/chat/service.ts:153`、:544、:919、:1254-1351 |
+| 迁移 | `migrations/0035_world_books_multi.sql` |
+| 仓储 | `src/workers/db/d1-repository.ts:385`、:1620-1760、:1076 |
+| 接口 | `src/workers/http/app.ts:616-650`、:1264-1500 |
+| 后台 | `web/src/pages/PromptsPage.tsx:230`、:1181-1400、:1602-1950、:2545-2650 |
+| 前端 API | `web/src/api.ts:3088-3560` |
 
 ## 52. preset-head-1：预设回到天头，长期记忆摘要跟着用户消息（2026-11-06）
 
@@ -5579,3 +5586,58 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 ### 78.5 回滚
 
 - 只动代码，没有新迁移：前端回 `bd5cec6` 即可回到「只能导入 + 编辑」；后端两条新路由留着对旧前端无影响（旧前端不会调用）。
+## 79. 世界书一层多本（worldbook-multi-1，2026-11-11）
+
+### 79.1 需求与决定
+
+
+- **导入永远是新增一本**：不再整层覆盖。同层重名不覆盖，由 `uniqueWorldBookName` 加「（2）」…「（999）」后缀区分；后缀只给后台看，不参与任何匹配。
+- **层间仍然互斥**：`channel > guild > global`，该层只要有一本启用的书就整层用这一层；这一层的书全停用才落到下一层。没有做酒馆那种 global 角色书与聊天书叠加。
+
+### 79.2 数据与迁移
+
+- `migrations/0035_world_books_multi.sql`：`world_books` 换成 `book_id TEXT PRIMARY KEY` + `scope` / `scope_id` / `name` / `book_json` / `entry_count` / `enabled` / `imported_at`，加 `idx_world_books_layer (scope, scope_id)`。旧行按 `scope || ':' || scope_id` 生成 `bookId` 原样搬过去，`enabled` 一律 1。
+- `world_book_state` 重建，主键 `(guild_id, channel_id, book_id, entry_id)`。旧账分不清属于哪一本，迁移直接清空——最多影响几轮粘性。
+- 类型：`WorldBookRecord`（`src/core/prompt/worldbook.ts:66`）、`WorldBookStore`（:77，`list` / `get` / `create` / `update` / `remove`）、`WorldEntryState`（:88，首字段 `bookId`）。仓储 `worldBooks`（`src/workers/db/d1-repository.ts:1623`）新书的 `bookId` 用 `crypto.randomUUID()`；`remove` 同批删书与账行。
+- `WorldBook` 多一个可选 `nextEntryId`（只增不减的条目号计数器），`normalizeWorldBook` 读到就保留、没读到就不补；老书第一次手动新建时按 `max(entries.id) + 1` 起算。
+- 老数据的 `book_json` 里没有新触发字段时，读侧 `normalizeWorldBook` 照旧补默认（位置 `anTop` 等），不需要回填迁移。
+
+### 79.3 选择与装配
+
+- `resolveWorldBooks(channel, guild, global)`（`worldbook.ts:443`）只做层选择，入参已经按 `enabled` 过滤过；返回整层。
+- 每本书独立跑一遍 `selectWorldEntries`（:577），`options.bookId` 决定它只认自己那本的状态行；条目内的 `group` 与概率都是书内概念。
+- `mergeWorldSelections(parts)`（:692）把各书结果拼起来：同一档位置内按 `(order, 书序, id)` 排序，书序就是层内传入顺序；同一个 id 在两本书里互不干扰，也不去重。
+- 四档 system 锚点（↑Char / ↓Char / ↑AN / ↓AN）各自成段；@D 用 `withWorldDepth`（:716）插进 messages，`depth = 0` 落在本轮用户消息之前（比酒馆差一位，理由见 §51.5）。
+- 状态：`nextWorldState` 是每本书选择结果里 `state` 的 flatMap，键为 `(guildId, channelId, bookId, entryId)`；有变化才 `save`。停用或删除的书不再出现在保存结果里，它的旧账行随整份覆盖被删掉。
+- 服务侧行号：`worldBookState` :153 / :574、`sameWorldState` :544、`readWorldBooks` :919、`booksAt` :1254、`worldBookHits` :1256、`worldParts` :1310、`worldSelection` :1318、`nextWorldState` :1320、`worldBlocks` :1329、`worldDepthEntries` :1335、四档拼接 :1337-1351。
+
+### 79.4 接口与后台
+
+- `GET /api/world-book`（`src/workers/http/app.ts:1264`）回 `items`，每行一本书，`entries` 是全部条目摘要（不含正文）；不再有「一层一项」。
+- `POST /api/world-book/import`（:1283）永远 `create` 一本，回 `bookId` / `name` / `layerCount`；不再有 `replaced`。
+- 新增 `PATCH /api/world-book`（:1326，body `{ bookId, enabled }`）整本开关，与 `DELETE /api/world-book`（:1313，body `{ bookId }`）删一本；旧的无 body 的 `DELETE` 删层写法已不存在。
+- 条目路由全部改成按 `bookId` 定位：GET :1342、PUT :1360、POST :1392、DELETE :1459；`POST` 不带 `bookId` 时按 `{ scope, scopeId, bookName, entry }` 新建一本。新条目 id 由 `book_json.nextEntryId` 计数器给出，只增不减；删掉当前最大号再新建也不会复用（粘性/冷却按 `entryId` 记账），老书没有计数器时按 `max + 1`。
+- 错误码补 `400 BAD_BOOK_ID` 与 `400 BAD_BOOK_ENABLED`；其余沿用 §51.4。
+- 后台（`web/src/pages/PromptsPage.tsx`）：每层列出全部书，一行一本，带启用勾选与「+ 新建条目」「删除本书」；展开一本才显示条目表与编辑表单（列表 :2625、空层 :2609、条目表 :1602、表单 :1668）。状态 `worldBookList` :1181、`toggleWorldBook` :1309、`removeWorldBook` :1332、`removeWorldBookEntry` :1361；接口封装 `web/src/api.ts` 的 `WorldBook` :3088、`importWorldBook` :3366、`deleteWorldBook` :3401、`updateWorldBookEnabled` :3406、`createWorldBookEntry` :3463、`deleteWorldBookEntry` :3501。
+- 导入确认文案改成「新增一本」：「这会为 <层> 新增一本世界书，同层已有的书全部保留；重名会自动加「（2）」后缀。」不再说「旧条目全部作废」。
+
+### 79.5 兼容与限制
+
+- 没有世界书时四个位置都是空串，system 与旧版逐字相同（测试里有一条「接线但三层都没书」的逐字断言）。
+- 老库升级后每层的那一本保留原 `bookId`（`scope:scope_id`），行为与升级前一致；粘性/冷却清零一次。
+- 层间互斥、@D 差一位、导入无撤销等限制与 §51.5 相同。
+- `0035` 不做数据回填以外的改写；旧行的 `enabled` 一律 1，不会因为升级突然停用。
+
+### 79.6 门槛与验证
+
+- `npx tsc --noEmit -p tsconfig.json` → 0。
+- `npx vitest run` → 94 文件 1785 例全过（210 s）。
+- `npm run test:node` → 9 文件 121 passed | 1 skipped（35 个迁移，含 0035）。
+- `npm run typecheck:web` → 0；`npm run build:web` → `index.html` 0.40 kB、`assets/index-f2dbFfPH.css` 25.46 kB、`assets/index-BEB98OTW.js` 429.98 kB。
+- 视觉验收（1280×800 深色）：Before `_dcai_preview/shots/table-with-edit-column.png`（单本、无开关）；After 同目录 `multi/` 五张——01 同层两本一启用一停用、02 停用书可展开、03 往第一本加条目后 4 条、04 删一本另一本还在、05 空层提示。
+- 测试子代理报的一处实现与注释不符：注释声称「删过的 id 不复用」，实际 `max + 1` 在删掉最大号后会复用。已改成 `book_json.nextEntryId` 持久计数器（`WorldBook` 新字段 + `normalizeWorldBook` 保留 + POST 读写计数器），并补了一条「删掉当前最大号再新建得 3 而不是 2」的接口测试（该文件 31 例全过）。
+
+### 79.7 回滚
+
+- 代码层回滚：把 `src/workers/gateway/engine.ts:133` 的门牌与镜像退回 `worldbook-crud-1`，再把前端退回上一版构建。**0035 不回滚**——旧代码读新表列名会失败，真要退回单本时代需要恢复 0035 之前的库备份（`/opt/backup-src-<ts>.tar.gz` 是源码备份，不是数据备份；数据备份见 §34）。
+- 行为回滚不必退版本：后台把新导入的书停用或删掉，同层旧书照旧参与；层间选择立刻回到升级前的效果。

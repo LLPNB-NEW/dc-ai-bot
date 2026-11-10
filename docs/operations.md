@@ -2240,48 +2240,48 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 
 ## 34. 世界书与预设破限怎么查
 
-这一节管两件事：世界书没生效，以及导完酒馆预设破限仍然失效。两者都随 `preset-3` 上线，`preset-4`（只改段顺序）、`identity-head-1`（只改身份块措辞与 `system` 块序）与 `preset-head-1`（只把 `before` 段放回天头、把摘要搬去本轮 user 消息）继续有效，别拿 `preset-2` 时的老判据去查。
+这一节管两件事：世界书没生效，以及导完酒馆预设破限仍然失效。世界书这一半按「一层多本 + 酒馆五档」写（当前门牌 `worldbook-multi-1`）；预设导入那一半仍按 `preset-import-2` 的口径，两边是两套存储，互不覆盖。
 
 ### 34.1 判据链
 
 按顺序走，走完还不行再看 §34.2 的回滚路。
 
-1. **门牌**：启动日志 `[node] listening … build=reply-tool-3` 或 `[gateway] node host started build=reply-tool-3`（§25.4）。看到 `preset-3` / `preset-4` 就是版本没换上去——先把实例换成这一版（§25.4、§26），别的判据都别往下看。
-2. **迁移**：`migrations/` 末尾是 `0029_world_books.sql`、共 29 个；老库（28 个迁移）升级的日志是先 `[node] 迁移已执行：0029_world_books.sql`、紧跟 `[node] 迁移检查完成 applied=1 skipped=28`；新库首次启动是 `applied=29 skipped=0`；已经有 29 个迁移的库（`preset-3` → `preset-4` → `identity-head-1` → `preset-head-1` 都是就地升级，这几版没有新迁移）是 `applied=0 skipped=29`。表没建起来时世界书接口会回 `501 WORLDBOOK_UNAVAILABLE`，那是「store 没接线」，不是数据丢了。
-3. **有没有那一层**：`curl -s http://127.0.0.1:8787/api/world-book -H 'x-admin-token: ADMIN_PASSWORD'` 看 `items` 里有没有你要的 `scope` / `scopeId`。三层是 `channel > guild > global` 取第一本**非空**，同一层再导一次是整本覆盖，不会叠加。
-4. **条目对不对**：看 `entryCount` 与条目摘要里的 `enabled` / `constant` / `order`。`enabled:false` 或 `disable:true` 的条目永不命中；非常驻又没有 `keys` 的条目在导入时就进了 `ignored`（`reason=noKeys`），`entryCount` 里不含它们。
-5. **回复里有没有 `【世界书】` 段**：抓一条真实回复的 system 看（位置在表情块之后、预设 `after` 段之前，`src/core/chat/service.ts:1156`，§51.3）。整段不存在就是没命中，不是装配位置错；存在但内容不对，才去查条目。
-6. **命中不了先看关键词与扫描窗口**：扫描窗口固定最近 4 条消息（`WORLD_SCAN_DEPTH_DEFAULT`，接口不暴露），更早的对话不参与触发；`caseSensitive` 为真时大小写要一模一样，`wholeWords` 为真时只有整词算，`selective` 条目还要 `secondaryKeys` 按 `selectiveLogic` 一起命中。想验证「这一层通不通」，先塞一条 `constant` 条目——它每轮必插，不受关键词与窗口影响。
-7. **导入后段数从 46 变 28 是不是丢段**：拿 `Meowssiah_1.9.12.json` 这份真实预设置为基准，旧版导入 46 段、约 9 万字符；`preset-3` 导入是 **28 段、正文合计 4,465 字**，`ignored = {disabled: 17, marker: 8}`（`preset-import-2` 之前的口径：17 段当时整批进 `ignored`、8 段是 marker、`继续游戏` 搬去了 global 深度注入，三个数字对上就是正常）。**`preset-import-2` 起那 17 段不再进 `ignored`，而是作为停用段一并导入**（§58），所以导入段数会比 28 多出这些停用段、`ignored` 只剩 marker / empty / badRole 三类，后台不再有「预设里关着的段（disabled）」那一栏——看不到这一组是预期，不是丢段。真丢段的话看 `prompt_order` 里主项 `order` 是不是空数组（空数组不再等于「全开」）。
-
-8. **导入后段顺序不对，怎么确认是这条链**：先回读 `GET /api/prompts`（`src/workers/http/app.ts:770`，要登录 Cookie）——`items` 里 global 那一项的 `segments` 按 `position` 升序排出来的 `name`，应与酒馆里那条提示词链逐项对得上；对不上再看顺序表取自哪一组：`preset-4` 起取第一个非空的顺序表（`src/core/prompt/sillytavern.ts:136-138`），写在 `100001` 那一组也照样还原，顺序表之外的段接在末尾（`src/core/prompt/sillytavern.ts:231-234`）。旧版遇到 100000 那一组 `order` 是空数组会回落到 `prompts` 原顺序，表现正是「段都在、数量也对、顺序乱」。门牌判据同第 1 条：`build=reply-tool-3`；迁移仍是 29 个，已有 29 个迁移的库是 `applied=0 skipped=29`（这一版没有新迁移）。
+1. **门牌**：启动日志 `[node] listening … build=worldbook-multi-1` 或 `[gateway] node host started build=worldbook-multi-1`（§25.4）。还是 `worldbook-crud-1` 及更早，说明镜像没换上去——先换版本，别的判据都别往下看。
+2. **迁移**：`migrations/` 末尾是 `0035_world_books_multi.sql`、共 35 个。从 34 个迁移的库升上来是 `[node] 迁移已执行：0035_world_books_multi.sql` + `迁移检查完成 applied=1 skipped=34`；新库首次启动 `applied=35 skipped=0`；已经在 35 个的库是 `applied=0 skipped=35`。0035 会重建 `world_book_state` 并清空旧记账（旧表分不清一条账属于哪本书），升级后第一轮的粘性/冷却从零开始是预期。表没建起来时世界书接口回 `501 WORLDBOOK_UNAVAILABLE`，那是 store 没接线，不是数据丢了。
+3. **这一层有没有书**：`curl -s http://127.0.0.1:8787/api/world-book -H 'x-admin-token: ADMIN_PASSWORD'` 看 `items`——同一 `scope` / `scopeId` 可以有多行，每行一个 `bookId`，带 `name`、`enabled`、`entryCount`、`importedAt`。层间仍是 `channel > guild > global` **整层互斥**：频道层只要有一本 `enabled: true` 的书，服务器层与全局层就完全不参与；频道层的书全停用才会落到下一层。层内启用的书**全部同时参与**，不是只取第一本。
+4. **条目对不对**：看 `entryCount` 与 `entries` 摘要里的 `enabled` / `constant` / `order` / `position` / `probability` / `group`。`enabled:false` 的条目不参与；非常驻又没有 `keys` 的条目在导入时进了 `ignored`（`reason=noKeys`），不计入 `entryCount`。摘要回这本的全部条目（不含正文），正文在编辑单条时单独取。
+5. **回复里有没有 `【世界书】`**：抓一条真实回复的请求体看。四档 system 锚点各自带一次 `【世界书】` 标题（↑Char 在最前、↓Char 在预设段之后、↑AN 在世界书段、↓AN 在 system 末尾），@D 是独立消息、**不带标题**。整段都不存在就是没命中或这层没有启用的书；存在但内容不对，才去查条目。
+6. **命中不了先看关键词、扫描窗口与节奏字段**：每条按自己的 `scanDepth ?? 书级默认` 建窗口，默认 4、上限 20，编辑表单里可以直接改；更早的对话不参与触发。`caseSensitive` 为真时大小写要一模一样，`wholeWords` 为真时只有整词算，`selective` 条目还要 `secondaryKeys` 按 `selectiveLogic` 一起命中。另外四件事会让条目「看起来没触发」：`probability < 100` 时掷骰没过、`delay` 还没到轮次、`cooldown` 还在冷却、同 `group` 里权重更高的另一条赢了。想验证这一层通不通，先塞一条 `constant` 条目——它每轮必插，不受关键词、窗口和概率影响。
+7. **导入后段数从 46 变 28 是不是丢段**：拿 `Meowssiah_1.9.12.json` 这份真实预设置为基准，旧版导入 46 段、约 9 万字符；`preset-3` 导入是 **28 段、正文合计 4,465 字**，`ignored = {disabled: 17, marker: 8}`。`preset-import-2` 起那 17 段不再进 `ignored`，而是作为停用段一并导入（§58），所以段数会比 28 多、`ignored` 只剩 marker / empty / badRole 三类，后台不再有「预设里关着的段（disabled）」那一栏——看不到这一组是预期，不是丢段。这一版没有动预设导入。
+8. **导入后段顺序不对**：先回读 `GET /api/prompts`（`src/workers/http/app.ts:770`，要登录 Cookie）——`items` 里 global 那一项的 `segments` 按 `position` 升序排出来的 `name`，应与酒馆里那条提示词链逐项对得上；对不上再看顺序表取自哪一组：`preset-4` 起取第一个非空的顺序表（`src/core/prompt/sillytavern.ts:136-138`），写在 `100001` 那一组也照样还原，顺序表之外的段接在末尾（`src/core/prompt/sillytavern.ts:231-234`）。
 
 ### 34.2 三条回滚路
 
-1. **删该层世界书**（最轻，只影响世界书）：后台「提示词」页「世界书」卡片选中那一层 → 删除该层；等价接口是 `curl -X DELETE http://127.0.0.1:8787/api/world-book -H 'x-admin-token: ADMIN_PASSWORD' -H 'content-type: application/json' -d '{"scope":"global","scopeId":""}'`（注意是 **JSON body**，不是 query）。删完那一层回空列表，提示词的 system 立刻回到没有世界书的样子（与旧版逐字相同）。
-2. **重新导入旧预设**：世界书和预设是两套存储——重导预设只覆盖文本段与 global 深度注入，不动 `world_books` 表；所以「破限变回去了」先把旧预设 JSON 原样再导一次（二次确认里那句「会一并覆盖 global 深度注入」是真的），世界书那层不用碰。反过来要把世界书退回旧版本，就重新 `POST /api/world-book/import` 传旧 JSON，同样整本覆盖。
-3. **回滚版本**：把 `src/workers/gateway/engine.ts:129` 的 `GATEWAY_BUILD` 连同镜像一起退回上一版（`preset-3`），确认启动日志回到 `build=preset-3`；这一版没有新迁移，`0029` 不用动。要退到再前一版（`preset-2`）才需要知道 `world_books` 表在那边没人读、留着不碍事，`0029` 也不回滚（迁移账本只增），旧版照样能跑。
+1. **停用或删掉某一本**（最轻，只影响世界书）：后台「提示词」页「世界书」卡片里每本一行——取消勾选「启用」只让这本不参与，同名同层的书照旧；「删除本书」只删这一本。等价接口：
+   - 停用：`curl -X PATCH http://127.0.0.1:8787/api/world-book -H 'x-admin-token: ADMIN_PASSWORD' -H 'content-type: application/json' -d '{"bookId":"<bookId>","enabled":false}'`
+   - 删除：`curl -X DELETE http://127.0.0.1:8787/api/world-book -H 'x-admin-token: ADMIN_PASSWORD' -H 'content-type: application/json' -d '{"bookId":"<bookId>"}'`
+
+   注意两处都只认 **JSON body** 里的 `bookId`，不再是 `{"scope","scopeId"}`（旧写法现在会回 `400 BAD_BOOK_ID`）。这一层一本不剩时，system 立刻回到没有世界书的样子（与旧版逐字相同）。
+2. **重新导入旧预设**：世界书和预设是两套存储——重导预设只覆盖文本段与 global 深度注入，不动 `world_books` 表；所以「破限变回去了」先把旧预设 JSON 原样再导一次（二次确认里那句「会一并覆盖 global 深度注入」是真的），世界书那层不用碰。反过来要把某一本世界书退回旧版本，`POST /api/world-book/import` 传旧 JSON **会新增一本**（重名加「（2）」），旧的那本要自己停用或删掉。
+3. **回滚版本**：把 `src/workers/gateway/engine.ts:133` 的 `GATEWAY_BUILD` 连同镜像一起退回上一版 `worldbook-crud-1`，确认启动日志回到 `build=worldbook-crud-1`。0035 不回滚：旧代码读 `world_books` 时列名已变（这条回滚只适用于「代码已部署但行为不对」的短窗口，真要退回单本时代还得恢复 0035 之前的库备份）。更稳的做法是保留新代码、在后台停用新书。
 
 ### 34.3 限制（别当 bug 报）
 
-- 只有关键词触发：没有向量检索、没有权重/概率、没有递归触发。
-- 扫描固定 4 条：`WORLD_SCAN_DEPTH_DEFAULT` 是常量默认值，接口没暴露，1–20 只能在代码里调。
-- 4000 字上限：`WORLD_BLOCK_MAX_CHARS = 4000` 只按正文累加，超出的条目静默不进块，**没有 warning**。
-- 一本书一格 JSON：导入即整本覆盖，没有逐条编辑；角色卡里的 `character_book` 也要手动导，不会随预设导入自动带上。
+- 只有关键词触发：没有向量检索、没有递归触发；概率、包含组、粘性、冷却、延迟、扫描深度都已按酒馆口径接上（§51.3、§77）。
+- 层间互斥：一次只有一层参与，不是三层相加；层内多本则全部参与。
+- 没有总字数上限：旧版 4000 字预算已取消，条目太长会直接占上下文窗口。
+- 导入永远是新增：同层重名加「（2）」后缀，不会覆盖旧书；一本书整本导入，条目可在后台逐条改/删/新建。
+- @D 的 `depth` 比酒馆差一位：这里 `depth = 0` 是本轮用户消息之前，酒馆是最后一条之后（刻意偏离，见 §51.5）。
+- 粘性/冷却按 `bookId + entryId` 记账：删掉再导入同一本书算新书，状态清零。
 - 破限还在提示词之外受上游约束：`src/core/providers/gemini.ts` 里没有 `safetySettings`，Gemini 的服务端安全过滤仍可能拦；`{{lastUserMessage}}` 这类宏仍被清空（`CLEARED_MACROS`），预设里依赖它的段会缺内容；除 jailbreak 外 ST 的 nsfw 槽等位置语义仍按 before 处理；导入仍无撤销。
 
 ### 34.4 判据
 
-- 迁移：`migrations/` 末尾是 `0029_world_books.sql`、共 29 个；启动日志 `applied=29 skipped=0`（新库）或 `applied=1 skipped=28`（从 28 个迁移的库升上来）；`preset-4`、`identity-head-1`、`preset-head-1`、`identity-off-1`、`reply-tool-1` 与 `reply-tool-3` 就地升级都是 `applied=0 skipped=29`（这几版都没有新迁移）。
-- 门牌：`preset-import-2`（现版：导入酒馆预设时，预设里自己关着的段也带进来、保持停用，后台可逐段打开；停用段不搬去深度注入，宏照样映射，§58；无新迁移、迁移总数仍是 30。上一版 `context-stream-1`（上下文工具模式的上游从非流式 `chat()` 改成流式 `chatStream()`（`stream: true`），但仍整段攒完才交付、分支内一次进度都不推；适配器把 `choices[0].delta.tool_calls` 逐帧交出来（`ToolCallDelta`），服务层按 `index` 拼回完整工具调用再交给 `readToolReply`，空回与续写的判据一个字没动，§57）。再上一版 `preset-import-1`（酒馆预设导入可以选层——`scope` = `global` / `guild` / `channel`，整层覆盖目标层、其它层不动，采样参数按目标层继承，历史后指令写同一层的深度注入，原始 JSON 按层各存一行，§56）。再上一版 `context-tool-5`（把钉死的 `tool_choice` 改回 `'auto'`，`src/core/chat/service.ts:1236`）、`context-tool-4`（已回退，曾把 `tool_choice` 钉成回复工具）、`context-tool-3`（上下文工具模式首版），三版定位见 §55.1）；再往前 `reply-tool-3`（180362§54）；上一次构建 `reply-tool-2`（行为与现版相同，只是验收时临时在成功日志尾部多带 `rawLen=` / `rawShell=` 两个诊断字段，`len=472 … rawLen=505 rawShell=<game>:1,</game>:1` 就是它留下的证据；现已下线）；前一版 `reply-tool-1`（把模型写在正文里的 `story_reply` 工具调用壳剥掉再发——壳不再作为正文发到频道；同时把 tools 定义发进请求，当前中继对 tools 是空转的兼容性保留，无新迁移、迁移总数仍 29，§54）；再前一版 `identity-off-1`（有预设段时不再追加身份块——这一轮有效提示词里只要有任何启用的 `before` 段，`system` 里就没有身份块；身份块只在没有前置预设段时兜底，无新迁移、迁移总数仍 29，§53）；再再前一版 `preset-head-1`（预设 `before` 段回到 `system` 天头、长期记忆摘要搬出 `system` 改拼在本轮那条 user 消息最前面，无新迁移、迁移总数仍 29，§52）；再再再前一版 `identity-head-1`（身份块去掉 Discord 平台措辞、平台元信息回到 `system` 天头，无新迁移、迁移总数仍 29，§52）；再往前 `preset-4`（阶段四：酒馆预设导入的段顺序按提示词链还原，迁移总数仍 29，§48.8）；`preset-3`（阶段三：世界书 + 酒馆预设导入器修正，新增迁移 `0029_world_books.sql`、迁移总数 29，§51、§48.7；`src/workers/gateway/engine.ts:129`，`test/gateway.node.test.ts:229` 同步；`preset-2` 是阶段二：路由采样参数 + 深度注入，§49、§50），日志里看到 `build=reply-tool-3`。
-- 数据：`SELECT scope, scope_id, name, entry_count, imported_at FROM world_books;` 一层一行；`entry_count` 是导入时被采纳的条目数（不含 `ignored`）。
-- 请求：system 里出现 `【世界书】` 且后面是命中条目的正文。
-- 摘要跟着用户消息：`runtime_logs` 里同一轮那条 `[chat] turn … summaryLen=… systemLen=…`（`src/core/chat/service.ts:1194-1208`）——`summaryLen` 是本轮摘要的总长，`systemLen` 从此不再包含摘要，所以摘要变长时只有 `summaryLen` 变、`systemLen` 不动；更硬的直接看请求体：最后一条 user 消息以 `【长期记忆摘要】` 开头、其后两个换行接 `<时刻> <作者名>：<正文>`，`system` 里搜不到【长期记忆摘要】；没有摘要时这条 user 消息与旧版逐字相同（`docs/architecture.md` §52.1、§52.3）；`systemLen` 现在也少了身份块那一段——`identity-off-1` 起有预设段时身份块整块不出现，所以同样的预设段内容，`systemLen` 会比 §52 时再小几十字（§53.4）。
-- 身份块没有出现：`system` 里搜不到 `【当前对话】`、也搜不到「和你说话的是」——这就是 `identity-off-1` 的正常样子（有角色卡 / 有 `before` 段时身份块整块不出现）。这两句出现只有两种可能：这一轮没有任何前置预设段（身份块在兜底，常见于某层只配了 `after` 段、又没配 fallback 文案），或者实例还跑着 `preset-head-1` 及更早的旧镜像（先按上一条对门牌）。身份块本身没删：后台「提示词」页的 `identity` 一块照旧能编辑、照旧按 channel > guild > global 分层（`docs/architecture.md` §53.4、§53.5）。
-- 导入结果：`moved` 非空说明有历史后指令搬去了深度注入；`injection.saved=false` 时去「深度注入」卡片手动保存一次。
-- 正文里还看得见工具调用壳：频道里出现 `<run_tool_name>`、`story_reply` 或 `<|FunctionCallEnd|>` 这类字样，说明实例还跑着 `identity-off-1` 及更早的旧镜像——先按上一条对门牌（`build=reply-tool-3`），对不上就是没换到这一版，不用先去查预设（`reply-tool-1` 起这些壳在发出去之前就被剥掉了，见 `docs/architecture.md` §54.2）。
-- 想知道这一轮有没有真发 tools：看请求体里有没有 `tools` 数组——只有 `system` 里出现 `story_reply` 时才会带（`docs/architecture.md` §54.5），空的时候连这个键都没有，`tool_choice` 也只在给了且 tools 非空时才发。别把「有 tools」当成模型会真调工具：这条中继实测 `tool_calls=0`，正文干净靠的是剥壳那一层，`tools` 只是兼容性保留。
-- 正文里还看得见 `<game>` 包裹标签：频道里出现 `<game>` 或 `</game>`（以及 `<game_content>` / `</game_content>`）字样，说明实例跑着 `reply-tool-1` 或更早——`reply-tool-3` 起成对的包裹标签在发出去之前就被剥掉，Discord 里不该再看到；只写了开头 `<game>` 而没有结尾的那种是刻意不剥的，见 `docs/architecture.md` §54.4。
+- 迁移：末尾 `0035_world_books_multi.sql`、共 35 个；启动日志 `applied=35 skipped=0`（新库）、`applied=1 skipped=34`（从 34 个升级）或 `applied=0 skipped=35`（已升级）。
+- 门牌：`build=worldbook-multi-1`（`src/workers/gateway/engine.ts:133`，`test/gateway.node.test.ts:229` 同步）。
+- 数据：`SELECT book_id, scope, scope_id, name, enabled, entry_count, imported_at FROM world_books ORDER BY scope, scope_id, imported_at;` 同一层多行是正常的；`world_book_state` 的 `book_id` 与书对应。
+- 请求：system 里出现 `【世界书】` 且后面是命中条目的正文；@D 条目作为独立消息插在历史里，没有标题。
+- 台账：`runtime_logs` 同一轮那条 `[chat] turn …` 末尾的 `world=<注入条数>/<参与条数>` 可以快速判断这轮有没有书参与；日志里没有 `world=` 段说明跑的还是很旧的镜像。
 
 ## 35. 上下文工具模式（context-stream-1，上一版；现版 `context-tool-6` 见 §37）怎么查
 

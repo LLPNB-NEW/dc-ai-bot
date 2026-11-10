@@ -1667,6 +1667,103 @@ fieldset.fallbacks legend {
   color: var(--danger);
 }
 
+/* 一层多本：每本书一张薄卡，标题行放书名 / 条数 / 导入时间 / 整本开关 / 操作 */
+.page.prompts .worldbook-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+
+.page.prompts .worldbook-book {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.page.prompts .worldbook-book-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+}
+
+/* 停用整本：标题行压暗，但展开、编辑、删除都还能用 */
+.page.prompts .worldbook-book.off .worldbook-book-head {
+  color: var(--muted);
+}
+
+.page.prompts .worldbook-book-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.page.prompts .worldbook-book-caret {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.page.prompts .worldbook-book-name {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.page.prompts .worldbook-book-switch {
+  margin: 0;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.page.prompts .worldbook-book-switch span {
+  font-size: 12px;
+}
+
+.page.prompts .worldbook-book-actions {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-left: auto;
+}
+
+/* 行内按钮排在 danger 之后会盖掉危险色，这里压回来 */
+.page.prompts .worldbook-book-actions button.danger {
+  color: var(--danger);
+}
+
+/* 条目表与编辑表单跟着书缩进，一眼看出它们属于这一本 */
+.page.prompts .worldbook-book .worldbook-entries {
+  padding: 0 12px;
+}
+
+.page.prompts .worldbook-book .worldbook-editor {
+  margin: 10px 12px 12px;
+}
+
+/* 这一层还没有书：虚线框里给提示与新建入口 */
+.page.prompts .worldbook-empty {
+  margin: 10px 0 4px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.page.prompts .worldbook-empty .hint {
+  margin: 0 0 6px;
+}
+
 /* 门牌 prompt-copy-1 语音页：接口卡片在上、语音回复与朗读语气卡片在下；单列才排得下「层 / ID / 值 / 时间」 */
 .page.voice {
   grid-template-columns: minmax(0, 1fr);

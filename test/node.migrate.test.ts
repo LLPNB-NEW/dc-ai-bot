@@ -44,6 +44,7 @@ const EXPECTED_FILES = [
   '0032_tts_gemini_dialect.sql',
   '0033_timeout_settings.sql',
   '0034_world_book_state.sql',
+  '0035_world_books_multi.sql',
 ];
 
 const ROOT = mkdtempSync(join(tmpdir(), 'dc-ai-bot-migrate-'));
@@ -64,7 +65,7 @@ afterAll(() => {
 });
 
 describe('runMigrations', () => {
-  it('34 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
+  it('35 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
     const filePath = newDbPath();
     const first = await runMigrations(filePath, MIGRATIONS_DIR);
     expect(first.applied).toEqual(EXPECTED_FILES);
@@ -199,8 +200,14 @@ describe('runMigrations', () => {
   });
 
   it('0029 建出 world_books：三层一行、主键 (scope, scope_id) 可整本覆盖，坏 scope 被拒', async () => {
+    // 0035 已经把主键换成 book_id，这一条只看 0029 落地时的形状
+    const before = join(ROOT, 'migrations-before-0030');
+    mkdirSync(before, { recursive: true });
+    for (const name of EXPECTED_FILES.filter((file) => file < '0030')) {
+      copyFileSync(join(MIGRATIONS_DIR, name), join(before, name));
+    }
     const filePath = newDbPath();
-    await runMigrations(filePath, MIGRATIONS_DIR);
+    expect((await runMigrations(filePath, before)).applied).toHaveLength(29);
     const db = createSqliteDatabase(filePath);
 
     const columns = await db
@@ -235,8 +242,14 @@ describe('runMigrations', () => {
   });
 
   it('0034 建出 world_book_state：主键 (guild_id, channel_id, entry_id)、两个计时列默认 0', async () => {
+    // 0035 重建了这张表（主键加 book_id），这一条只看 0034 落地时的形状
+    const before = join(ROOT, 'migrations-before-0035');
+    mkdirSync(before, { recursive: true });
+    for (const name of EXPECTED_FILES.filter((file) => file < '0035')) {
+      copyFileSync(join(MIGRATIONS_DIR, name), join(before, name));
+    }
     const filePath = newDbPath();
-    await runMigrations(filePath, MIGRATIONS_DIR);
+    expect((await runMigrations(filePath, before)).applied).toHaveLength(34);
     const db = createSqliteDatabase(filePath);
 
     const columns = await db
@@ -280,6 +293,114 @@ describe('runMigrations', () => {
           'INSERT INTO world_book_state (guild_id, channel_id, entry_id, sticky_until, cooldown_until, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
         )
         .bind('g1', 'c1', 7, 9, 9, '2026-01-01T00:00:02.000Z')
+        .run(),
+    ).rejects.toThrow();
+  });
+
+  it('0035 一层多本：book_id 变主键、老行按 scope:scope_id 搬过去，记账键加书、旧记账清空', async () => {
+    // 先建出 0034 的形态（world_books 主键 (scope, scope_id)、world_book_state 主键不含 book_id），再单独跑 0035
+    const before = join(ROOT, 'migrations-before-0035-books');
+    mkdirSync(before, { recursive: true });
+    for (const name of EXPECTED_FILES.filter((file) => file < '0035')) {
+      copyFileSync(join(MIGRATIONS_DIR, name), join(before, name));
+    }
+    const filePath = newDbPath();
+    expect((await runMigrations(filePath, before)).applied).toHaveLength(34);
+
+    const db = createSqliteDatabase(filePath);
+    await db
+      .prepare('INSERT INTO world_books (scope, scope_id, name, book_json, entry_count, imported_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind('guild', 'g1', '旧书', '{"name":"旧书","entries":[]}', 0, '2026-01-01T00:00:00.000Z')
+      .run();
+    await db
+      .prepare('INSERT INTO world_books (scope, scope_id, name, book_json, entry_count, imported_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind('global', '', '全局书', '{"name":"全局书","entries":[]}', 2, '2026-01-01T00:00:01.000Z')
+      .run();
+    await db
+      .prepare('INSERT INTO world_book_state (guild_id, channel_id, entry_id, sticky_until, cooldown_until, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind('g1', 'c1', 7, 3, 4, '2026-01-01T00:00:02.000Z')
+      .run();
+
+    const only = join(ROOT, 'migrations-0035-only');
+    mkdirSync(only, { recursive: true });
+    copyFileSync(join(MIGRATIONS_DIR, '0035_world_books_multi.sql'), join(only, '0035_world_books_multi.sql'));
+    expect((await runMigrations(filePath, only)).applied).toEqual(['0035_world_books_multi.sql']);
+
+    const columns = await db
+      .prepare('PRAGMA table_info(world_books)')
+      .all<{ name: string; type: string; notnull: number; pk: number; dflt_value: string | null }>();
+    expect(columns.results.map((column) => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['book_id', 'TEXT', 1, 1],
+      ['scope', 'TEXT', 1, 0],
+      ['scope_id', 'TEXT', 1, 0],
+      ['name', 'TEXT', 1, 0],
+      ['book_json', 'TEXT', 1, 0],
+      ['entry_count', 'INTEGER', 1, 0],
+      ['enabled', 'INTEGER', 1, 0],
+      ['imported_at', 'TEXT', 1, 0],
+    ]);
+    expect(columns.results.map((column) => column.dflt_value)).toEqual([null, null, "''", null, null, null, '1', null]);
+
+    // 老行原样保留：book_id 由 scope 与 scope_id 拼出来，enabled 缺省 1
+    const rows = await db
+      .prepare('SELECT book_id, scope, scope_id, name, entry_count, enabled, imported_at FROM world_books ORDER BY book_id')
+      .all();
+    expect(rows.results).toEqual([
+      { book_id: 'global:', scope: 'global', scope_id: '', name: '全局书', entry_count: 2, enabled: 1, imported_at: '2026-01-01T00:00:01.000Z' },
+      { book_id: 'guild:g1', scope: 'guild', scope_id: 'g1', name: '旧书', entry_count: 0, enabled: 1, imported_at: '2026-01-01T00:00:00.000Z' },
+    ]);
+
+    // book_id 才是主键：同一层还能再放一本，整本停用只是一个列值
+    await db
+      .prepare('INSERT INTO world_books (book_id, scope, scope_id, name, book_json, entry_count, enabled, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind('book-2', 'guild', 'g1', '第二本', '{"name":"第二本","entries":[]}', 0, 0, '2026-01-01T00:00:03.000Z')
+      .run();
+    const layer = await db
+      .prepare('SELECT book_id, enabled FROM world_books WHERE scope = ? AND scope_id = ? ORDER BY book_id')
+      .bind('guild', 'g1')
+      .all();
+    expect(layer.results).toEqual([
+      { book_id: 'book-2', enabled: 0 },
+      { book_id: 'guild:g1', enabled: 1 },
+    ]);
+    // CHECK 随重建一起回来
+    await expect(
+      db
+        .prepare('INSERT INTO world_books (book_id, scope, scope_id, name, book_json, entry_count, enabled, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind('book-3', 'team', '', 'x', '{}', 0, 1, '2026-01-01T00:00:04.000Z')
+        .run(),
+    ).rejects.toThrow();
+
+    // 记账键加书：旧行没法判断属于哪一本，整表清空而不是猜
+    const stateColumns = await db
+      .prepare('PRAGMA table_info(world_book_state)')
+      .all<{ name: string; type: string; notnull: number; pk: number }>();
+    expect(stateColumns.results.map((column) => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['guild_id', 'TEXT', 1, 1],
+      ['channel_id', 'TEXT', 1, 2],
+      ['book_id', 'TEXT', 1, 3],
+      ['entry_id', 'INTEGER', 1, 4],
+      ['sticky_until', 'INTEGER', 1, 0],
+      ['cooldown_until', 'INTEGER', 1, 0],
+      ['updated_at', 'TEXT', 1, 0],
+    ]);
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM world_book_state').first<{ n: number }>()).toEqual({ n: 0 });
+
+    // 两本书各有一条 id=1 的条目：主键含 book_id，两行都能落
+    await db
+      .prepare('INSERT INTO world_book_state (guild_id, channel_id, book_id, entry_id, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .bind('g1', 'c1', 'book-2', 1, '2026-01-01T00:00:05.000Z')
+      .run();
+    await db
+      .prepare('INSERT INTO world_book_state (guild_id, channel_id, book_id, entry_id, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .bind('g1', 'c1', 'guild:g1', 1, '2026-01-01T00:00:06.000Z')
+      .run();
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM world_book_state').first<{ n: number }>()).toEqual({ n: 2 });
+    // 同一本书的同一个 id 仍然只有一行
+    await expect(
+      db
+        .prepare('INSERT INTO world_book_state (guild_id, channel_id, book_id, entry_id, updated_at) VALUES (?, ?, ?, ?, ?)')
+        .bind('g1', 'c1', 'guild:g1', 1, '2026-01-01T00:00:07.000Z')
         .run(),
     ).rejects.toThrow();
   });

@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest';
 import type { ChatMessage, ScopedKey } from '../src/core/types';
 import {
   buildWorldBlock,
+  mergeWorldSelections,
   parseWorldBook,
   readWorldPosition,
   readWorldRole,
-  resolveWorldBook,
+  resolveWorldBooks,
   selectWorldEntries,
+  uniqueWorldBookName,
   withWorldDepth,
-  WORLD_BLOCK_MAX_CHARS,
   WORLD_DEPTH_MAX,
   WORLD_GROUP_WEIGHT_DEFAULT,
   WORLD_POSITIONS,
@@ -18,6 +19,7 @@ import {
 } from '../src/core/prompt/worldbook';
 import type {
   WorldBook,
+  WorldBookPart,
   WorldBookRecord,
   WorldEntry,
   WorldEntryState,
@@ -66,23 +68,35 @@ function entry(overrides: Partial<WorldEntry> = {}): WorldEntry {
   };
 }
 
+/** 单书用例的默认书 id：记账行不带它会被当成别的书，跨书用例自己传 bookId */
+const BOOK_ID = 'book-a';
+
+/** 粘性/冷却记账行：默认落在 BOOK_ID 这本书，跨书用例传第四个数 */
+function stateRow(entryId: number, stickyUntil: number, cooldownUntil: number, bookId = BOOK_ID): WorldEntryState {
+  return { bookId, entryId, stickyUntil, cooldownUntil };
+}
+
 /** 选择结果只关心条目本身：这里把 WorldSelection 拆成数组，断言与旧版一一对应 */
 function pick(
   value: WorldBook,
   messages: readonly { role: string; content: string }[],
   scanDepth?: number,
-  options: { state?: WorldEntryState[]; turn?: number; random?: () => number } = {},
+  options: { bookId?: string; state?: readonly WorldEntryState[]; turn?: number; random?: () => number } = {},
 ): WorldEntry[] {
-  return selectWorldEntries(value, messages, { ...options, ...(scanDepth === undefined ? {} : { scanDepth }) }).entries;
+  return selectWorldEntries(value, messages, {
+    bookId: BOOK_ID,
+    ...options,
+    ...(scanDepth === undefined ? {} : { scanDepth }),
+  }).entries;
 }
 
 /** 要看 skipped / state / byPosition 的用例走这里：pick 只把 entries 摊平 */
 function select(
   value: WorldBook,
   messages: readonly { role: string; content: string }[],
-  options: { scanDepth?: number; state?: readonly WorldEntryState[]; turn?: number; random?: () => number } = {},
+  options: { bookId?: string; scanDepth?: number; state?: readonly WorldEntryState[]; turn?: number; random?: () => number } = {},
 ): WorldSelection {
-  return selectWorldEntries(value, messages, options);
+  return selectWorldEntries(value, messages, { bookId: BOOK_ID, ...options });
 }
 
 function book(entries: WorldEntry[]): WorldBook {
@@ -93,14 +107,22 @@ function message(content: string, role = 'user'): { role: string; content: strin
   return { role, content };
 }
 
-function record(scope: ScopedKey['scope'], scopeId: string, name: string): WorldBookRecord {
+function record(
+  scope: ScopedKey['scope'],
+  scopeId: string,
+  name: string,
+  overrides: Partial<WorldBookRecord> = {},
+): WorldBookRecord {
   return {
     scope,
     scopeId,
+    bookId: scope + ':' + scopeId,
     name,
     book: book([entry({ keys: ['龙'] })]),
     entryCount: 1,
     importedAt: '2026-10-25T03:00:00.000Z',
+    enabled: true,
+    ...overrides,
   };
 }
 
@@ -579,7 +601,7 @@ describe('selectWorldEntries 触发', () => {
   });
 });
 
-describe('selectWorldEntries 排序与预算', () => {
+describe('selectWorldEntries 排序与不设字数上限', () => {
   it('按 order 升序，同 order 按 id 升序，且不改动原书顺序', () => {
     const target = book([
       entry({ id: 3, order: 50, constant: true, content: 'c' }),
@@ -591,33 +613,26 @@ describe('selectWorldEntries 排序与预算', () => {
     expect(target.entries.map((item) => item.id)).toEqual([3, 9, 2]);
   });
 
-  it('累计后超过 4000 字就整条跳过，不截断正文', () => {
+  it('总量超过 4000 字不再裁条目：两条 3000 字常驻整条都收', () => {
     const big = 'x'.repeat(3000);
     const target = book([
       entry({ id: 0, constant: true, content: big }),
       entry({ id: 1, constant: true, content: big }),
     ]);
-    const picked = pick(target, [message('无关')]);
-    expect(picked.map((item) => item.id)).toEqual([0]);
-    expect(picked[0]?.content).toHaveLength(3000);
-    expect(WORLD_BLOCK_MAX_CHARS).toBe(4000);
+    const result = select(target, [message('无关')]);
+    expect(result.entries.map((item) => item.id)).toEqual([0, 1]);
+    expect(result.entries.map((item) => item.content)).toEqual([big, big]);
+    expect(result.skipped).toEqual([]);
+    // 两条 3000 字正文 + 中间两个换行，一个字都不省
+    expect(result.usedChars).toBe(6002);
   });
 
-  it('预算按 trim 后的正文加两条之间的两个换行算，刚好 4000 收下', () => {
-    const first = 'x'.repeat(2000);
-    const second = 'y'.repeat(1998);
-    const target = book([
-      entry({ id: 0, constant: true, content: '  ' + first + '  ' }),
-      entry({ id: 1, constant: true, content: second }),
-      entry({ id: 2, constant: true, content: 'z' }),
-    ]);
-    const picked = pick(target, [message('无关')]);
-    expect(picked.map((item) => item.id)).toEqual([0, 1]);
-  });
-
-  it('单条正文超过 4000 也不收', () => {
-    const target = book([entry({ constant: true, content: 'x'.repeat(4001) })]);
-    expect(pick(target, [message('无关')])).toHaveLength(0);
+  it('单条正文远超 4000 也照收，正文不截断', () => {
+    const target = book([entry({ constant: true, content: 'x'.repeat(12000) })]);
+    const result = select(target, [message('无关')]);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]?.content).toHaveLength(12000);
+    expect(result.usedChars).toBe(12000);
   });
 });
 
@@ -710,25 +725,25 @@ describe('selectWorldEntries 粘性', () => {
   it('首次命中后 stickyUntil = turn + sticky', () => {
     const result = select(stickyBook(), [message('龙')], { turn: 10 });
     expect(result.entries.map((item) => item.id)).toEqual([0]);
-    expect(result.state).toEqual([{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }]);
+    expect(result.state).toEqual([stateRow(0, 12, 0)]);
   });
 
   it('粘性期内不带关键词也入选，过期那轮不再入选', () => {
-    const state = [{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }];
+    const state = [stateRow(0, 12, 0)];
     expect(pick(stickyBook(), [message('无关')], undefined, { turn: 11, state })).toHaveLength(1);
     expect(pick(stickyBook(), [message('无关')], undefined, { turn: 12, state })).toHaveLength(1);
     expect(pick(stickyBook(), [message('无关')], undefined, { turn: 13, state })).toHaveLength(0);
   });
 
   it('每命中一轮都顺延：turn=11 命中后 stickyUntil=13', () => {
-    const state = [{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }];
+    const state = [stateRow(0, 12, 0)];
     const result = select(stickyBook(), [message('无关')], { turn: 11, state });
-    expect(result.state).toEqual([{ entryId: 0, stickyUntil: 13, cooldownUntil: 0 }]);
+    expect(result.state).toEqual([stateRow(0, 13, 0)]);
   });
 
   it('粘性期内不掷骰：probability=0 也照样入选', () => {
     let rolls = 0;
-    const state = [{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }];
+    const state = [stateRow(0, 12, 0)];
     const random = (): number => {
       rolls += 1;
       return 0.99;
@@ -744,7 +759,7 @@ describe('selectWorldEntries 冷却', () => {
   it('cooldown=3：turn=10 触发后 11/12/13 被挡且记 cooldown，turn=14 恢复', () => {
     const first = select(cooledBook(), [message('龙')], { turn: 10 });
     expect(first.entries.map((item) => item.id)).toEqual([0]);
-    expect(first.state).toEqual([{ entryId: 0, stickyUntil: 0, cooldownUntil: 13 }]);
+    expect(first.state).toEqual([stateRow(0, 0, 13)]);
 
     for (const turn of [11, 12, 13]) {
       const result = select(cooledBook(), [message('无关')], { turn, state: first.state });
@@ -771,18 +786,11 @@ describe('selectWorldEntries 延迟', () => {
 describe('selectWorldEntries 状态回写', () => {
   it('没入选但仍在冷却的行保留，过期行剔除', () => {
     const target = book([entry({ keys: ['龙'], cooldown: 3 })]);
-    const state = [
-      { entryId: 0, stickyUntil: 0, cooldownUntil: 13 },
-      { entryId: 9, stickyUntil: 0, cooldownUntil: 5 },
-      { entryId: 8, stickyUntil: 20, cooldownUntil: 0 },
-    ];
+    const state = [stateRow(0, 0, 13), stateRow(9, 0, 5), stateRow(8, 20, 0)];
 
     const result = select(target, [message('无关')], { turn: 10, state });
     expect(result.entries).toEqual([]);
-    expect(result.state).toEqual([
-      { entryId: 0, stickyUntil: 0, cooldownUntil: 13 },
-      { entryId: 8, stickyUntil: 20, cooldownUntil: 0 },
-    ]);
+    expect(result.state).toEqual([stateRow(0, 0, 13), stateRow(8, 20, 0)]);
   });
 
   it('入选但既无粘性也无冷却的条目不进 state', () => {
@@ -794,10 +802,10 @@ describe('selectWorldEntries 状态回写', () => {
 
   it('过期旧行被这一轮的新行替换', () => {
     const target = book([entry({ keys: ['龙'], sticky: 2 })]);
-    const state = [{ entryId: 0, stickyUntil: 12, cooldownUntil: 0 }];
+    const state = [stateRow(0, 12, 0)];
 
     const result = select(target, [message('龙')], { turn: 20, state });
-    expect(result.state).toEqual([{ entryId: 0, stickyUntil: 22, cooldownUntil: 0 }]);
+    expect(result.state).toEqual([stateRow(0, 22, 0)]);
   });
 });
 
@@ -875,17 +883,146 @@ describe('buildWorldBlock', () => {
     ]);
     expect(block).toBe('【世界书】\n龙住在山里。\n\n凤住在天上。');
   });
+
+  it('整块超过 4000 字也不截断', () => {
+    const tail = 'y'.repeat(2500);
+    const block = buildWorldBlock([entry({ content: 'x'.repeat(2500) }), entry({ content: '  ' + tail + '  ' })]);
+    expect(block).toBe('【世界书】\n' + 'x'.repeat(2500) + '\n\n' + tail);
+  });
 });
 
-describe('resolveWorldBook 三层整本覆盖', () => {
-  it('channel > guild > global，哪层有书整本用哪层', () => {
+describe('resolveWorldBooks 层间互斥、层内多本', () => {
+  it('channel > guild > global：哪层有启用的书就整层用哪层', () => {
     const channel = record('channel', 'c1', '频道书');
     const guild = record('guild', 'g1', '公会书');
     const global = record('global', '', '全局书');
 
-    expect(resolveWorldBook(channel, guild, global)?.name).toBe('频道书');
-    expect(resolveWorldBook(null, guild, global)?.name).toBe('公会书');
-    expect(resolveWorldBook(null, null, global)?.name).toBe('全局书');
-    expect(resolveWorldBook(null, null, null)).toBeNull();
+    expect(resolveWorldBooks([channel], [guild], [global]).map((item) => item.name)).toEqual(['频道书']);
+    expect(resolveWorldBooks([], [guild], [global]).map((item) => item.name)).toEqual(['公会书']);
+    expect(resolveWorldBooks([], [], [global]).map((item) => item.name)).toEqual(['全局书']);
+    expect(resolveWorldBooks([], [], [])).toEqual([]);
+  });
+
+  it('同一层的两本都返回，顺序就是传进来的顺序，后面的层一概不看', () => {
+    const dragon = record('guild', 'g1', '龙书', { bookId: 'book-dragon' });
+    const whale = record('guild', 'g1', '鲸书', { bookId: 'book-whale' });
+    const global = record('global', '', '全局书');
+
+    expect(resolveWorldBooks([], [dragon, whale], [global])).toEqual([dragon, whale]);
+    // 上层只要有一本启用就轮不到下层：全局书在结果里连影子都没有
+    expect(resolveWorldBooks([], [dragon, whale], [global]).map((item) => item.name)).toEqual(['龙书', '鲸书']);
+    expect(resolveWorldBooks([], [], [global]).map((item) => item.bookId)).toEqual(['global:']);
+  });
+
+  it('返回的是一份新数组：调用方改动不会动到入参', () => {
+    const guild = [record('guild', 'g1', '公会书')];
+    const picked = resolveWorldBooks([], guild, []);
+    picked.pop();
+    expect(guild).toHaveLength(1);
+  });
+});
+
+describe('uniqueWorldBookName 重名加后缀', () => {
+  it('没重名原样返回，首尾空白先 trim', () => {
+    expect(uniqueWorldBookName([], '江湖设定')).toBe('江湖设定');
+    expect(uniqueWorldBookName(['别的书'], '  江湖设定  ')).toBe('江湖设定');
+  });
+
+  it('重名加全角括号序号，已占用的序号跳过去', () => {
+    expect(uniqueWorldBookName(['江湖设定'], '江湖设定')).toBe('江湖设定（2）');
+    expect(uniqueWorldBookName(['江湖设定', '江湖设定（2）'], '江湖设定')).toBe('江湖设定（3）');
+    // 「（2）」是别的书自己的名字，不挡没有重名的本名
+    expect(uniqueWorldBookName(['江湖设定（2）'], '江湖设定')).toBe('江湖设定');
+  });
+
+  it('空名字落成未命名世界书，重名同样加后缀', () => {
+    expect(uniqueWorldBookName([], '   ')).toBe('未命名世界书');
+    expect(uniqueWorldBookName(['未命名世界书'], '')).toBe('未命名世界书（2）');
+  });
+});
+
+describe('selectWorldEntries 按 bookId 隔离记账', () => {
+  it('state 里别的书的同 id 行不算数：A 书没关键词就不入选', () => {
+    const target = book([entry({ id: 1, keys: ['龙'], sticky: 2 })]);
+    const foreign = [stateRow(1, 90, 0, 'book-b')];
+    expect(pick(target, [message('无关')], undefined, { state: foreign, turn: 10 })).toHaveLength(0);
+
+    const own = [stateRow(1, 90, 0, BOOK_ID)];
+    expect(pick(target, [message('无关')], undefined, { state: own, turn: 10 })).toHaveLength(1);
+  });
+
+  it('两本书各有一条 id=1：粘性只续自己那本的命，冷却也只挡自己那本', () => {
+    const shared = [stateRow(1, 20, 0, 'book-dragon'), stateRow(1, 0, 99, 'book-whale')];
+
+    const dragon = book([entry({ id: 1, keys: ['龙'], sticky: 2 })]);
+    const dragonResult = select(dragon, [message('无关')], { bookId: 'book-dragon', state: shared, turn: 10 });
+    expect(dragonResult.entries.map((item) => item.id)).toEqual([1]);
+    expect(dragonResult.state).toEqual([stateRow(1, 12, 0, 'book-dragon')]);
+
+    // 龙书的粘性行对鲸书无效：鲸书只按自己那条冷却走
+    const whale = book([entry({ id: 1, keys: ['鲸'], cooldown: 3 })]);
+    const whaleResult = select(whale, [message('鲸')], { bookId: 'book-whale', state: shared, turn: 10 });
+    expect(whaleResult.entries).toEqual([]);
+    expect(whaleResult.skipped).toEqual([{ id: 1, name: '条目', reason: 'cooldown' }]);
+    expect(whaleResult.state).toEqual([stateRow(1, 0, 99, 'book-whale')]);
+  });
+});
+
+describe('mergeWorldSelections 同层多本合并', () => {
+  function part(bookId: string, entries: WorldEntry[], messages: readonly { role: string; content: string }[] = [message('无关')]): WorldBookPart {
+    return { bookId, selection: selectWorldEntries(book(entries), messages, { bookId }) };
+  }
+
+  it('两本书的条目合进同一档：先按 order，再按书序，最后按 id', () => {
+    const dragon = part('book-dragon', [
+      entry({ id: 5, order: 30, constant: true, content: '龙-30' }),
+      entry({ id: 1, order: 10, constant: true, content: '龙-10' }),
+    ]);
+    const whale = part('book-whale', [
+      entry({ id: 1, order: 20, constant: true, content: '鲸-20' }),
+      entry({ id: 9, order: 10, constant: true, content: '鲸-10' }),
+    ]);
+
+    const merged = mergeWorldSelections([dragon, whale]);
+    // order=10 的两条按书序（龙书先传）排，同书内才看 id
+    expect(merged.byPosition.anTop.map((item) => item.content)).toEqual(['龙-10', '鲸-10', '鲸-20', '龙-30']);
+    expect(merged.usedChars).toBe(dragon.selection.usedChars + whale.selection.usedChars);
+    expect(merged.skipped).toEqual([]);
+  });
+
+  it('两本书按各自的 position 各进各档，互不挤占', () => {
+    const dragon = part('book-dragon', [entry({ id: 0, constant: true, position: 'beforeChar', content: '天头' })]);
+    const whale = part('book-whale', [entry({ id: 0, constant: true, position: 'atDepth', content: '深度' })]);
+
+    const merged = mergeWorldSelections([dragon, whale]);
+    expect(merged.byPosition.beforeChar.map((item) => item.content)).toEqual(['天头']);
+    expect(merged.byPosition.atDepth.map((item) => item.content)).toEqual(['深度']);
+    expect(merged.byPosition.anTop).toEqual([]);
+  });
+
+  it('skipped 带书 id：两本书各挡一条也能分清是哪本', () => {
+    const dragon = part('book-dragon', [entry({ id: 1, keys: ['龙'], probability: 0 })], [message('龙')]);
+    const whale: WorldBookPart = {
+      bookId: 'book-whale',
+      selection: selectWorldEntries(book([entry({ id: 1, keys: ['鲸'], cooldown: 3 })]), [message('无关')], {
+        bookId: 'book-whale',
+        turn: 1,
+        state: [stateRow(1, 0, 9, 'book-whale')],
+      }),
+    };
+
+    const merged = mergeWorldSelections([dragon, whale]);
+    expect(merged.skipped).toEqual([
+      { id: 1, name: '条目', reason: 'probability', bookId: 'book-dragon' },
+      { id: 1, name: '条目', reason: 'cooldown', bookId: 'book-whale' },
+    ]);
+    expect(merged.byPosition.anTop).toEqual([]);
+  });
+
+  it('空 parts 等于没有世界书：三档全空、字数 0', () => {
+    const merged = mergeWorldSelections([]);
+    for (const position of WORLD_POSITIONS) expect(merged.byPosition[position]).toEqual([]);
+    expect(merged.usedChars).toBe(0);
+    expect(merged.skipped).toEqual([]);
   });
 });

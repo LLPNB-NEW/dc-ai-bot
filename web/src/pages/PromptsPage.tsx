@@ -57,6 +57,7 @@ import {
   savePromptDefault,
   savePromptInjection,
   saveWorldBookEntry,
+  updateWorldBookEnabled,
   type InjectionRole,
   type PromptCopyResult,
   type PromptDefaultEntry,
@@ -75,7 +76,7 @@ import {
   type WorldBookEntrySummary,
   type WorldBookIgnoreReason,
   type WorldBookImportResult,
-  type WorldBookLayer,
+  type WorldBook,
   type WorldEntryRole,
   type WorldPosition,
   type WorldSelectiveLogic,
@@ -225,11 +226,10 @@ function describeWorldBookKeys(entry: WorldBookEntrySummary): string {
   return (extra > 0 ? head + ' +' + String(extra) : head) + secondary;
 }
 
-// 结论行：写入条数 + 覆盖条数。契约没写 replaced 是布尔还是条数，
-// 后端没给条数时用导入前这一层的条目数兜底，免得「覆盖 0 条」把人骗了。
-function describeWorldBookOutcome(result: WorldBookImportResult, before: number): string {
-  const replaced = result.replacedCount > 0 ? result.replacedCount : result.replaced ? before : 0;
-  return '已写入 ' + String(result.entryCount) + ' 条（覆盖 ' + String(replaced) + ' 条）';
+// 结论行：导入永远新增一本，所以只说新书名、写入条数与这一层现在几本。
+function describeWorldBookOutcome(result: WorldBookImportResult): string {
+  const name = result.name === '' ? '（未命名）' : result.name;
+  return '已新增「' + name + '」：写入 ' + String(result.entryCount) + ' 条，这一层现在共 ' + String(result.layerCount) + ' 本';
 }
 
 // 逐条编辑：数字字段先存字符串，留空与越界统一在保存前判，输入过程中不拦人。
@@ -545,8 +545,8 @@ export default function PromptsPage() {
   const [copyBusy, setCopyBusy] = useState(false);
   const [copyError, setCopyError] = useState('');
   const [copyResult, setCopyResult] = useState<PromptCopyResult | null>(null);
-  // 世界书：整本列表一次读回（就三层），选中层决定下面显示 / 删除的是哪一本。
-  const [worldBooks, setWorldBooks] = useState<WorldBookLayer[] | null>(null);
+  // 世界书：所有层的所有书一次读回；scope + scopeId 筛出当前层的书。
+  const [worldBooks, setWorldBooks] = useState<WorldBook[] | null>(null);
   const [worldBookScope, setWorldBookScope] = useState<Scope>('global');
   const [worldBookTargetIds, setWorldBookTargetIds] = useState<Record<Scope, string>>({ channel: '', guild: '', global: '' });
   const [worldBookFile, setWorldBookFile] = useState<{ name: string; book: unknown } | null>(null);
@@ -554,17 +554,24 @@ export default function PromptsPage() {
   const [worldBookBusy, setWorldBookBusy] = useState(false);
   const [worldBookError, setWorldBookError] = useState('');
   const [worldBookMessage, setWorldBookMessage] = useState('');
-  // before = 导入前这一层的条目数：契约里 replaced 可能只是布尔，兜底时要用它。
-  const [worldBookResult, setWorldBookResult] = useState<{ result: WorldBookImportResult; before: number } | null>(null);
+  const [worldBookResult, setWorldBookResult] = useState<WorldBookImportResult | null>(null);
+  // 哪一本展开着条目表；一次只展开一本，换层 / 换对象就收起。
+  const [worldBookExpandedId, setWorldBookExpandedId] = useState<string | null>(null);
+  // 正在 PATCH 整本开关的那一本：只锁这一行的开关，别的书还能操作。
+  const [worldBookTogglingId, setWorldBookTogglingId] = useState<string | null>(null);
   // 逐条编辑：列表只有摘要，正文要打开时现读一条；表单期间不重拉整表，免得冲掉没保存的改动。
+  // bookId 与条目 id 一起记：条目 id 只在书内唯一，缺了书就不知道该写哪一本。
+  const [worldBookEditBookId, setWorldBookEditBookId] = useState<string | null>(null);
   const [worldBookEditId, setWorldBookEditId] = useState<number | null>(null);
   const [worldBookDraft, setWorldBookDraft] = useState<WorldEntryDraft | null>(null);
   const [worldBookEditLoading, setWorldBookEditLoading] = useState(false);
   const [worldBookEditBusy, setWorldBookEditBusy] = useState(false);
   const [worldBookEditError, setWorldBookEditError] = useState('');
   const [worldBookEditFields, setWorldBookEditFields] = useState<WorldEntryFieldErrors>({});
-  // 新建模式与逐条编辑共用同一块表单与同一份草稿；这一层还没有书时多一个必填的书名。
+  // 新建模式与逐条编辑共用同一块表单与同一份草稿。
+  // createBookId 为 null = 这一层还没有书，保存时先按书名新建一本；否则直接写进这本书。
   const [worldBookCreating, setWorldBookCreating] = useState(false);
+  const [worldBookCreateBookId, setWorldBookCreateBookId] = useState<string | null>(null);
   const [worldBookBookName, setWorldBookBookName] = useState('');
   const [worldBookBookNameError, setWorldBookBookNameError] = useState('');
   // 换层 / 收起 / 再点另一行之后，先前发出的详情响应回来也不许再填回表单。
@@ -1162,16 +1169,21 @@ export default function PromptsPage() {
   }
 
 
-  // 世界书三层：global 的 scopeId 恒为空；非全局层填了 ID 才定位得到一本。
+  // 世界书：global 的 scopeId 恒为空；非全局层填了 ID 才能筛出这一层的书。
   const worldBookTargetId = normalizeScopeId(worldBookScope, worldBookTargetIds[worldBookScope]);
 
-  function worldBookAt(layers: WorldBookLayer[] | null, scope: Scope, scopeId: string): WorldBookLayer | null {
-    if (layers === null) return null;
+  function worldBooksAt(scope: Scope, scopeId: string): WorldBook[] {
+    if (worldBooks === null) return [];
     const target = normalizeScopeId(scope, scopeId);
-    return layers.find((item) => item.scope === scope && item.scopeId === target) ?? null;
+    return worldBooks.filter((item) => item.scope === scope && item.scopeId === target);
   }
 
-  const worldBookEntry = worldBookAt(worldBooks, worldBookScope, worldBookTargetId);
+  const worldBookList = worldBooksAt(worldBookScope, worldBookTargetId);
+
+  function findWorldBook(bookId: string | null): WorldBook | null {
+    if (bookId === null || worldBooks === null) return null;
+    return worldBooks.find((item) => item.bookId === bookId) ?? null;
+  }
 
   function worldBookTargets(scope: Scope): string[] {
     if (worldBooks === null) return [];
@@ -1183,16 +1195,11 @@ export default function PromptsPage() {
     return ids;
   }
 
-  // tab 上只放短状态：书名 + 条目数 + 导入时间放在选中层的标题行，
-  // 长书名塞进胶囊会把三个 tab 挤成两行。
+  // tab 上只放短状态：这一层一共几本；书名 / 条数 / 导入时间留给书自己的行。
   function worldBookSummary(scope: Scope): string {
     if (worldBooks === null) return '未导入';
-    if (scope === 'global') {
-      const entry = worldBookAt(worldBooks, 'global', '');
-      return entry === null ? '未导入' : '已导入 · ' + String(entry.entryCount) + ' 条';
-    }
-    const count = worldBookTargets(scope).length;
-    return count > 0 ? '已导入 ' + String(count) + ' 个' : '未导入';
+    const count = worldBooks.filter((item) => item.scope === scope).length;
+    return count === 0 ? '未导入' : String(count) + ' 本';
   }
 
   async function loadWorldBooks(): Promise<void> {
@@ -1233,6 +1240,7 @@ export default function PromptsPage() {
   function selectWorldBookLayer(scope: Scope): void {
     resetWorldBookEdit();
     setWorldBookScope(scope);
+    setWorldBookExpandedId(null);
     setWorldBookError('');
     setWorldBookMessage('');
     setWorldBookResult(null);
@@ -1241,6 +1249,7 @@ export default function PromptsPage() {
   function selectWorldBookTarget(value: string): void {
     resetWorldBookEdit();
     setWorldBookTargetIds({ ...worldBookTargetIds, [worldBookScope]: value });
+    setWorldBookExpandedId(null);
     setWorldBookError('');
     setWorldBookMessage('');
     setWorldBookResult(null);
@@ -1273,11 +1282,10 @@ export default function PromptsPage() {
       return;
     }
     const targetLabel = describeScopeTarget(worldBookScope, worldBookTargetId);
-    const before = worldBookEntry === null ? 0 : worldBookEntry.entryCount;
     if (
       !window.confirm(
-        '导入会整层覆盖 ' + targetLabel + ' 现有的世界书：这一层旧条目全部作废，其它层不受影响。' +
-          '这一层手工新建的条目也会被整本覆盖清掉。确定继续？',
+        '导入会为 ' + targetLabel + ' 新增一本世界书，不会覆盖这一层已有的书：' +
+          '导进来的是独立的一本，同层的书全部保留。重名会自动加「（2）」后缀。确定继续？',
       )
     ) {
       return;
@@ -1285,10 +1293,12 @@ export default function PromptsPage() {
     setWorldBookBusy(true);
     try {
       const result = await importWorldBook({ scope: worldBookScope, scopeId: worldBookTargetId, book: source.book });
-      setWorldBookResult({ result, before });
-      // 整层重导后旧条目 id 已作废，编辑区要收起。
+      setWorldBookResult(result);
+      // 换书后旧条目 id 已作废，编辑区要收起；展开刚导进来的那本，让人马上看到条目。
       resetWorldBookEdit();
+      setWorldBookExpandedId(result.bookId === '' ? null : result.bookId);
       await loadWorldBooks();
+      setWorldBookMessage('已新增世界书「' + (result.name === '' ? '未命名' : result.name) + '」');
     } catch (err) {
       setWorldBookError(describeWorldBookError(err));
     } finally {
@@ -1296,19 +1306,50 @@ export default function PromptsPage() {
     }
   }
 
-  async function removeWorldBook(): Promise<void> {
-    if (worldBookBusy || worldBookEntry === null) return;
+  async function toggleWorldBook(book: WorldBook): Promise<void> {
+    if (worldBookBusy || worldBookTogglingId !== null) return;
+    setWorldBookError('');
+    setWorldBookMessage('');
+    setWorldBookTogglingId(book.bookId);
+    try {
+      const updated = await updateWorldBookEnabled(book.bookId, !book.enabled);
+      // 只换这一行：别的书、别的层都不动，展开状态也保持不变。
+      setWorldBooks((current) =>
+        current === null
+          ? current
+          : current.map((item) => (item.bookId === book.bookId ? { ...item, enabled: updated.enabled } : item)),
+      );
+      setWorldBookMessage(
+        '已' + (updated.enabled ? '启用' : '停用') + '「' + (book.name === '' ? '这本没有名字' : book.name) + '」',
+      );
+    } catch (err) {
+      setWorldBookError(describeWorldBookEntryError(err));
+    } finally {
+      setWorldBookTogglingId(null);
+    }
+  }
+
+  async function removeWorldBook(book: WorldBook): Promise<void> {
+    if (worldBookBusy || worldBookTogglingId !== null) return;
     const targetLabel = describeScopeTarget(worldBookScope, worldBookTargetId);
-    if (!window.confirm('确定删掉 ' + targetLabel + ' 这一层的世界书？删完会话回落到下一层，其它层不动。')) return;
+    const name = book.name === '' ? '这本没有名字' : book.name;
+    if (
+      !window.confirm(
+        '确定删掉 ' + targetLabel + ' 的「' + name + '」？只删这一本，同层其它书不动；删完会话回落到下一层。',
+      )
+    ) {
+      return;
+    }
     setWorldBookError('');
     setWorldBookMessage('');
     setWorldBookResult(null);
     setWorldBookBusy(true);
     try {
-      await deleteWorldBook({ scope: worldBookScope, scopeId: worldBookTargetId });
-      resetWorldBookEdit();
+      await deleteWorldBook(book.bookId);
+      if (worldBookEditBookId === book.bookId || worldBookCreateBookId === book.bookId) resetWorldBookEdit();
+      if (worldBookExpandedId === book.bookId) setWorldBookExpandedId(null);
       await loadWorldBooks();
-      setWorldBookMessage('已删除 ' + targetLabel + ' 这一层的世界书');
+      setWorldBookMessage('已删除「' + name + '」：只删了这一本，同层其它书还在');
     } catch (err) {
       setWorldBookError(describeWorldBookError(err));
     } finally {
@@ -1316,28 +1357,33 @@ export default function PromptsPage() {
     }
   }
 
-  // 删一条：二次确认沿用「删除这一层的世界书」那一套 window.confirm；删掉最后一条整本书就没了。
-  async function removeWorldBookEntry(item: WorldBookEntrySummary): Promise<void> {
+  // 删一条：二次确认写清只动这本书；删掉最后一条时服务端连书移除，界面收起这本书。
+  async function removeWorldBookEntry(book: WorldBook, item: WorldBookEntrySummary): Promise<void> {
     if (worldBookBusy || worldBookEditBusy) return;
-    const targetLabel = describeScopeTarget(worldBookScope, worldBookTargetId);
+    const bookName = book.name === '' ? '这本没有名字' : book.name;
     const name = item.name.trim() === '' ? '无名条目' : item.name.trim();
-    const last = worldBookEntry !== null && worldBookEntry.entryCount <= 1;
+    const last = book.entryCount <= 1;
     const tail = last
-      ? '这是最后一条：删完这一层的世界书整本移除，这一层回到「未导入」。'
-      : '其它条目和别的层都不动。';
-    if (!window.confirm('确定删掉 ' + targetLabel + ' 的「' + name + '」？' + tail)) return;
+      ? '这是这本书最后一条：删完这本书整本移除，同层其它书不动。'
+      : '其它条目和同层其它书都不动。';
+    if (!window.confirm('确定删掉「' + bookName + '」里的「' + name + '」？' + tail)) return;
     setWorldBookError('');
     setWorldBookMessage('');
     setWorldBookResult(null);
     setWorldBookBusy(true);
     try {
-      const result = await deleteWorldBookEntry({ scope: worldBookScope, scopeId: worldBookTargetId, id: item.id });
-      // 删的正是表单里那一条：id 已经作废，表单要收起。
-      if (worldBookEditId === item.id) resetWorldBookEdit();
+      const result = await deleteWorldBookEntry({ bookId: book.bookId, id: item.id });
+      // 删的正是表单里那一条（或正在往这本书新建）：id 已经作废，表单要收起。
+      if (worldBookEditBookId === book.bookId && (worldBookEditId === item.id || worldBookCreating)) {
+        resetWorldBookEdit();
+      }
+      if (result.removedBook) {
+        if (worldBookExpandedId === book.bookId) setWorldBookExpandedId(null);
+      }
       await loadWorldBooks();
       setWorldBookMessage(
         result.removedBook
-          ? '已删除「' + name + '」：这一层没有条目了，世界书整本移除'
+          ? '已删除「' + name + '」：这本书没有条目了，整本移除，同层其它书还在'
           : '已删除「' + name + '」',
       );
     } catch (err) {
@@ -1349,6 +1395,7 @@ export default function PromptsPage() {
 
   function resetWorldBookEdit(): void {
     worldBookEditEpoch.current += 1;
+    setWorldBookEditBookId(null);
     setWorldBookEditId(null);
     setWorldBookDraft(null);
     setWorldBookEditLoading(false);
@@ -1356,6 +1403,7 @@ export default function PromptsPage() {
     setWorldBookEditError('');
     setWorldBookEditFields({});
     setWorldBookCreating(false);
+    setWorldBookCreateBookId(null);
     setWorldBookBookName('');
     setWorldBookBookNameError('');
   }
@@ -1365,14 +1413,16 @@ export default function PromptsPage() {
     resetWorldBookEdit();
   }
 
-  // 新建：就在逐条编辑那块位置上铺一份空白草稿；这一层没有书时表单里多一个书名。
-  function openWorldBookCreate(): void {
+  // 新建：book 非空时直接写进这本书；book 为 null 时这一层还没有书，表单里多一个必填书名。
+  function openWorldBookCreate(book: WorldBook | null): void {
     if (worldBookEditBusy) return;
-    if (worldBookCreating) {
+    const bookId = book === null ? null : book.bookId;
+    if (worldBookCreating && worldBookCreateBookId === bookId) {
       resetWorldBookEdit();
       return;
     }
     worldBookEditEpoch.current += 1;
+    setWorldBookEditBookId(null);
     setWorldBookEditId(null);
     setWorldBookDraft(newWorldEntryDraft());
     setWorldBookEditLoading(false);
@@ -1380,33 +1430,36 @@ export default function PromptsPage() {
     setWorldBookEditError('');
     setWorldBookEditFields({});
     setWorldBookCreating(true);
+    setWorldBookCreateBookId(bookId);
+    if (bookId !== null) setWorldBookExpandedId(bookId);
     setWorldBookBookName('');
     setWorldBookBookNameError('');
     setWorldBookError('');
   }
 
   // 点一行：读这一条的正文再铺成表单；点正在编辑的那行就收起。
-  async function openWorldBookEdit(item: WorldBookEntrySummary): Promise<void> {
+  async function openWorldBookEdit(book: WorldBook, item: WorldBookEntrySummary): Promise<void> {
     if (worldBookEditBusy) return;
-    if (worldBookEditId === item.id && !worldBookEditLoading) {
+    if (worldBookEditBookId === book.bookId && worldBookEditId === item.id && !worldBookEditLoading) {
       resetWorldBookEdit();
       return;
     }
     // 从新建切到编辑：新建那份草稿连书名一起丢掉。
     setWorldBookCreating(false);
+    setWorldBookCreateBookId(null);
     setWorldBookBookName('');
     setWorldBookBookNameError('');
-    const scope = worldBookScope;
-    const scopeId = worldBookTargetId;
     const epoch = worldBookEditEpoch.current + 1;
     worldBookEditEpoch.current = epoch;
+    setWorldBookEditBookId(book.bookId);
+    setWorldBookExpandedId(book.bookId);
     setWorldBookEditId(item.id);
     setWorldBookDraft(null);
     setWorldBookEditError('');
     setWorldBookEditFields({});
     setWorldBookEditLoading(true);
     try {
-      const entry = await fetchWorldBookEntry(scope, scopeId, item.id);
+      const entry = await fetchWorldBookEntry(book.bookId, item.id);
       if (worldBookEditEpoch.current !== epoch) return;
       setWorldBookDraft(toWorldEntryDraft(entry));
     } catch (err) {
@@ -1439,7 +1492,7 @@ export default function PromptsPage() {
       return;
     }
     // 这一层还没有书：书名必填（trim 后 1..80 字），提示语与后端 BAD_BOOK_NAME 共用一句。
-    const needsBookName = creating && worldBookEntry === null;
+    const needsBookName = creating && worldBookCreateBookId === null;
     let bookName: string | null = null;
     if (needsBookName) {
       const trimmed = worldBookBookName.trim();
@@ -1452,6 +1505,8 @@ export default function PromptsPage() {
     }
     const scope = worldBookScope;
     const scopeId = worldBookTargetId;
+    const createBookId = worldBookCreateBookId;
+    const editBookId = worldBookEditBookId;
     const rowId = worldBookDraft.id;
     setWorldBookEditBusy(true);
     setWorldBookEditError('');
@@ -1459,28 +1514,40 @@ export default function PromptsPage() {
     setWorldBookBookNameError('');
     try {
       if (creating) {
-        const created = await createWorldBookEntry({ scope, scopeId, bookName, entry: built.entry });
-        // 新建可能顺带建了一本书：书名、条目数、「未导入」状态都变了，整表重读这一层。
+        const created = await createWorldBookEntry({
+          scope,
+          scopeId,
+          bookId: createBookId,
+          bookName,
+          entry: built.entry,
+        });
+        // 新建可能顺带建了一本书：书名、条目数、整表状态都变了，重读后展开刚写进去的那本。
+        const targetBookId = created.bookId === '' ? createBookId : created.bookId;
         resetWorldBookEdit();
         await loadWorldBooks();
+        if (targetBookId !== null) setWorldBookExpandedId(targetBookId);
         const label = created.entry.name.trim() === '' ? '无名条目' : created.entry.name.trim();
         setWorldBookMessage(
           created.createdBook
             ? '已新建世界书「' + (created.name === '' ? label : created.name) + '」，并写入第一条「' + label + '」'
-            : '已新建「' + label + '」',
+            : '已写入「' + label + '」到「' + (created.name === '' ? '这本书' : created.name) + '」',
         );
         return;
       }
-      const saved = await saveWorldBookEntry(scope, scopeId, built.entry);
+      if (editBookId === null) {
+        setWorldBookEditError('不知道该写进哪一本：收起表单，重新点这本书里的「编辑」');
+        return;
+      }
+      const saved = await saveWorldBookEntry(editBookId, built.entry);
       const summary = toWorldEntrySummary(saved);
-      // 只换这一层这一行：不重拉整表，别的层和别的行都不动。
+      // 只换这一本的这一行：不重拉整表，别的书、别的层都不动。
       setWorldBooks((current) =>
         current === null
           ? current
-          : current.map((layer) =>
-              layer.scope === scope && layer.scopeId === scopeId
-                ? { ...layer, entries: layer.entries.map((item) => (item.id === rowId ? summary : item)) }
-                : layer,
+          : current.map((book) =>
+              book.bookId === editBookId
+                ? { ...book, entries: book.entries.map((item) => (item.id === rowId ? summary : item)) }
+                : book,
             ),
       );
       resetWorldBookEdit();
@@ -1493,19 +1560,19 @@ export default function PromptsPage() {
     }
   }
 
-  function renderWorldBookResult(saved: { result: WorldBookImportResult; before: number }): ReactElement {
+  function renderWorldBookResult(result: WorldBookImportResult): ReactElement {
     const groups = WORLD_BOOK_IGNORE_REASONS.map((reason) => ({
       reason,
-      items: saved.result.ignored.filter((item) => item.reason === reason),
+      items: result.ignored.filter((item) => item.reason === reason),
     })).filter((group) => group.items.length > 0);
     return (
       <div className="prompt-import-result">
-        <p className="ok">{describeWorldBookOutcome(saved.result, saved.before)}</p>
-        {saved.result.warnings.length === 0 ? null : (
+        <p className="ok">{describeWorldBookOutcome(result)}</p>
+        {result.warnings.length === 0 ? null : (
           <div className="prompt-import-warnings">
-            <span className="hint">后端提醒（{String(saved.result.warnings.length)} 条）：</span>
+            <span className="hint">后端提醒（{String(result.warnings.length)} 条）：</span>
             <ul>
-              {saved.result.warnings.slice(0, WORLD_BOOK_WARNING_LIMIT).map((warning) => (
+              {result.warnings.slice(0, WORLD_BOOK_WARNING_LIMIT).map((warning) => (
                 <li key={warning}>{warning}</li>
               ))}
             </ul>
@@ -1532,17 +1599,15 @@ export default function PromptsPage() {
     );
   }
 
-  function renderWorldBookEntries(): ReactElement | null {
-    const entry = worldBookEntry;
-    if (entry === null) return null;
-    if (entry.entries.length === 0) return <p className="hint">这一层世界书没有条目摘要可显示。</p>;
-    const rows = entry.entries.slice(0, WORLD_BOOK_ROWS_LIMIT);
-    const hidden = entry.entryCount - rows.length;
-    const disabledCount = entry.entries.filter((item) => !item.enabled).length;
+  function renderWorldBookEntries(book: WorldBook): ReactElement | null {
+    if (book.entries.length === 0) return <p className="hint">这本书没有条目摘要可显示。</p>;
+    const rows = book.entries.slice(0, WORLD_BOOK_ROWS_LIMIT);
+    const hidden = book.entryCount - rows.length;
+    const disabledCount = book.entries.filter((item) => !item.enabled).length;
     return (
       <div className="worldbook-entries">
         <p className="hint">
-          条目摘要：共 {formatNumber(entry.entryCount)} 条
+          条目摘要：共 {formatNumber(book.entryCount)} 条
           {disabledCount === 0 ? '' : '，其中 ' + formatNumber(disabledCount) + ' 条停用（不参与装配）'}
           {hidden > 0 ? '；表里只列前 ' + String(rows.length) + ' 条' : ''}
         </p>
@@ -1563,7 +1628,7 @@ export default function PromptsPage() {
                   key={item.id}
                   className={
                     (item.enabled ? 'worldbook-row' : 'worldbook-row off') +
-                    (worldBookEditId === item.id ? ' editing' : '')
+                    (worldBookEditBookId === book.bookId && worldBookEditId === item.id ? ' editing' : '')
                   }
                 >
                   <td className="worldbook-name">{item.name === '' ? '（无名条目）' : item.name}</td>
@@ -1576,15 +1641,15 @@ export default function PromptsPage() {
                         type="button"
                         className="link small"
                         disabled={worldBookEditBusy || worldBookBusy}
-                        onClick={() => void openWorldBookEdit(item)}
+                        onClick={() => void openWorldBookEdit(book, item)}
                       >
-                        {worldBookEditId === item.id ? '收起' : '编辑'}
+                        {worldBookEditBookId === book.bookId && worldBookEditId === item.id ? '收起' : '编辑'}
                       </button>
                       <button
                         type="button"
                         className="link small danger"
                         disabled={worldBookEditBusy || worldBookBusy}
-                        onClick={() => void removeWorldBookEntry(item)}
+                        onClick={() => void removeWorldBookEntry(book, item)}
                       >
                         删除
                       </button>
@@ -1600,7 +1665,7 @@ export default function PromptsPage() {
   }
 
   // 逐条编辑 / 新建区：同页展开，不弹窗。字段顺序按契约分组：基本 / 关键词 / 触发 / 排序。
-  function renderWorldBookEditor(): ReactElement | null {
+  function renderWorldBookEditor(book: WorldBook | null): ReactElement | null {
     if (worldBookEditId === null && !worldBookCreating) return null;
     const draft = worldBookDraft;
     const title =
@@ -1609,12 +1674,19 @@ export default function PromptsPage() {
         : draft.name.trim() === ''
           ? '（无名条目）'
           : draft.name;
-    // 这一层还没有书：新建时书名必填；已有书就沿用原名，表单里不再问。
-    const needsBookName = worldBookCreating && worldBookEntry === null;
+    // book 为 null = 这一层还没有书，新建时书名必填；否则直接写进这本书，书名不变。
+    const needsBookName = worldBookCreating && book === null;
     const submitLabel = worldBookCreating ? '新建并保存' : '保存';
+    const bookLabel = book === null ? '' : book.name === '' ? '这本没有名字' : book.name;
     const head = (
       <div className="worldbook-editor-head">
-        <h3>{worldBookCreating ? '新建条目' : '编辑条目 · ' + title}</h3>
+        <h3>
+          {worldBookCreating
+            ? book === null
+              ? '新建条目（同时新建这本书）'
+              : '新建条目 · ' + bookLabel
+            : '编辑条目 · ' + title}
+        </h3>
         <button type="button" className="ghost small" disabled={worldBookEditBusy} onClick={closeWorldBookEdit}>
           收起
         </button>
@@ -1671,9 +1743,7 @@ export default function PromptsPage() {
           <p className="hint">
             {needsBookName
               ? '保存后这一层就有世界书了：条目 id 由服务端分配，写进去的是第一条。'
-              : '保存后写进这一层现有的世界书「' +
-                (worldBookEntry === null || worldBookEntry.name === '' ? '这本没有名字' : worldBookEntry.name) +
-                '」，书名不变。'}
+              : '保存后写进「' + bookLabel + '」这本书，书名不变；同层其它书不动。'}
           </p>
         ) : null}
         <div className="worldbook-editor-group">
@@ -2472,10 +2542,11 @@ export default function PromptsPage() {
       </div>
 
       <div className="card prompt-defaults worldbook">
-        <h2>世界书（酒馆 lorebook，整本导入）</h2>
+        <h2>世界书（酒馆 lorebook，一层多本）</h2>
         <p className="hint">
-          三层各存一本：优先级 频道 &gt; 服务器 &gt; 全局，会话只装配命中的那一本。
-          导入是整层覆盖：同一层的旧条目会被这一本替换掉，其它层不动。
+          一个频道 / 服务器 / 全局可以放多本：启用中的书同时参与装配；优先级
+          频道 &gt; 服务器 &gt; 全局，这一层整层都停用才落到下一层。
+          导入永远是新增一本，不会覆盖同层已有的书。
         </p>
         <div className="prompt-default-layers" role="tablist">
           {PROMPT_DEFAULT_SCOPES.map((scopeOption) => {
@@ -2533,32 +2604,89 @@ export default function PromptsPage() {
         )}
         {worldBookError === '' ? null : <p className="error">{worldBookError}</p>}
         {worldBooks === null && worldBookError === '' ? <p className="hint">正在读取世界书…</p> : null}
-        {worldBookEntry === null ? null : (
-          <div className="worldbook-head">
-            <h3>{worldBookEntry.name === '' ? '（这本没有名字）' : worldBookEntry.name}</h3>
-            <span className="badge">{formatNumber(worldBookEntry.entryCount)} 条</span>
-            <span className="badge">导入于 {formatSavedAt(worldBookEntry.importedAt)}</span>
-            <span className="badge">{describeScopeTarget(worldBookEntry.scope, worldBookEntry.scopeId)}</span>
-          </div>
-        )}
-        {worldBookEntry === null && (worldBookScope === 'global' || worldBookTargetId.trim() !== '') ? (
-          <p className="hint">这一层还没有世界书：可以先导入，也可以直接新建条目。</p>
+        {worldBooks !== null && (worldBookScope === 'global' || worldBookTargetId.trim() !== '') ? (
+          worldBookList.length === 0 ? (
+            <div className="worldbook-empty">
+              <p className="hint">这一层还没有世界书：可以新增一本，也可以导入</p>
+              <div className="worldbook-entry-actions">
+                <button
+                  type="button"
+                  className="ghost small"
+                  disabled={worldBookBusy || worldBookEditBusy}
+                  onClick={() => openWorldBookCreate(null)}
+                >
+                  {worldBookCreating && worldBookCreateBookId === null ? '收起新建' : '+ 新建条目'}
+                </button>
+                <span className="hint">还没有书：先填书名，保存后这本书就有第一条了。</span>
+              </div>
+              {worldBookCreating && worldBookCreateBookId === null ? renderWorldBookEditor(null) : null}
+            </div>
+          ) : (
+            <div className="worldbook-list">
+              {worldBookList.map((book) => {
+                const expanded = worldBookExpandedId === book.bookId;
+                const editingHere = worldBookEditBookId === book.bookId && worldBookEditId !== null;
+                const creatingHere = worldBookCreating && worldBookCreateBookId === book.bookId;
+                return (
+                  <div className={book.enabled ? 'worldbook-book' : 'worldbook-book off'} key={book.bookId}>
+                    <div className="worldbook-book-head">
+                      <button
+                        type="button"
+                        className="worldbook-book-toggle"
+                        aria-expanded={expanded}
+                        onClick={() => setWorldBookExpandedId(expanded ? null : book.bookId)}
+                      >
+                        <span className="worldbook-book-caret" aria-hidden="true">
+                          {expanded ? '▾' : '▸'}
+                        </span>
+                        <span className="worldbook-book-name">
+                          {book.name === '' ? '（这本没有名字）' : book.name}
+                        </span>
+                      </button>
+                      <span className="badge">{formatNumber(book.entryCount)} 条</span>
+                      <span className="badge">导入于 {formatSavedAt(book.importedAt)}</span>
+                      <label className="row checkbox worldbook-book-switch">
+                        <input
+                          type="checkbox"
+                          checked={book.enabled}
+                          disabled={
+                            worldBookBusy || (worldBookTogglingId !== null && worldBookTogglingId !== book.bookId)
+                          }
+                          onChange={() => void toggleWorldBook(book)}
+                        />
+                        <span>{book.enabled ? '启用' : '停用'}</span>
+                      </label>
+                      <span className="worldbook-book-actions">
+                        <button
+                          type="button"
+                          className="link small"
+                          disabled={worldBookBusy || worldBookEditBusy}
+                          onClick={() => openWorldBookCreate(book)}
+                        >
+                          {creatingHere ? '收起新建' : '+ 新建条目'}
+                        </button>
+                        <button
+                          type="button"
+                          className="link small danger"
+                          disabled={worldBookBusy}
+                          onClick={() => void removeWorldBook(book)}
+                        >
+                          删除本书
+                        </button>
+                      </span>
+                    </div>
+                    {expanded ? (
+                      <>
+                        {renderWorldBookEntries(book)}
+                        {editingHere || creatingHere ? renderWorldBookEditor(book) : null}
+                      </>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )
         ) : null}
-        <div className="worldbook-entry-actions">
-          <button
-            type="button"
-            className="ghost small"
-            disabled={
-              worldBookBusy || worldBookEditBusy || (worldBookScope !== 'global' && worldBookTargetId.trim() === '')
-            }
-            onClick={openWorldBookCreate}
-          >
-            {worldBookCreating ? '收起新建' : '+ 新建条目'}
-          </button>
-          <span className="hint">新建只加这一条，不动这一层已有的条目。</span>
-        </div>
-        {renderWorldBookEntries()}
-        {renderWorldBookEditor()}
         <div className="row">
           <label className="field">
             <span>世界书文件（.json 或角色卡 V2）</span>
@@ -2587,13 +2715,13 @@ export default function PromptsPage() {
         </div>
         {worldBookFile === null ? null : <p className="hint">已读入文件：{worldBookFile.name}</p>}
         <p className="hint">
-          <span>{'导入前先确认：这会整层覆盖 '}</span>
+          <span>{'新增前先确认：这会为 '}</span>
           <strong>
             {worldBookScope !== 'global' && worldBookTargetId === ''
               ? '（还没填 ' + PROMPT_SCOPE_TITLES[worldBookScope] + ' ID）'
               : describeScopeTarget(worldBookScope, worldBookTargetId)}
           </strong>
-          <span>{' 现有的世界书（旧条目全部作废），其它层不受影响。'}</span>
+          <span>{' 新增一本世界书，同层已有的书全部保留；重名会自动加「（2）」后缀。'}</span>
         </p>
         {worldBookMessage === '' ? null : <p className="ok">{worldBookMessage}</p>}
         {worldBookResult === null ? null : renderWorldBookResult(worldBookResult)}
@@ -2604,15 +2732,7 @@ export default function PromptsPage() {
             disabled={worldBookBusy || (worldBookScope !== 'global' && worldBookTargetId.trim() === '')}
             onClick={() => void runWorldBookImport()}
           >
-            {worldBookBusy ? '导入中…' : '导入并覆盖这一层'}
-          </button>
-          <button
-            type="button"
-            className="danger"
-            disabled={worldBookBusy || worldBookEntry === null}
-            onClick={() => void removeWorldBook()}
-          >
-            删除这一层的世界书
+            {worldBookBusy ? '导入中…' : '新增一本'}
           </button>
         </div>
       </div>

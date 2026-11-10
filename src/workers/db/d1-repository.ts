@@ -361,15 +361,18 @@ function toPromptInjectionConfig(row: PromptInjectionRow): PromptInjectionConfig
 }
 
 interface WorldBookRow {
+  book_id: string;
   scope: string;
   scope_id: string;
   name: string;
   book_json: string;
   entry_count: number;
+  enabled: number;
   imported_at: string;
 }
 
 interface WorldBookStateRow {
+  book_id: string;
   entry_id: number;
   sticky_until: number;
   cooldown_until: number;
@@ -391,7 +394,10 @@ function toWorldBookRecord(row: WorldBookRow): WorldBookRecord | null {
   // 闸门只管「读侧真的会碰」的那几个字段在不在；新字段之前的书缺 position/sticky/scanDepth 之类，
   // 到这里补成当前版本的默认值，上层拿到的书就永远是这一版形状
   const normalized = normalizeWorldBook(parsed);
+  // book_id 是 0035 起的主键；老行（手工补库）缺它就退化成层内唯一，至少不会三本撞成一个 id
+  const bookId = typeof row.book_id === 'string' && row.book_id !== '' ? row.book_id : row.scope + ':' + row.scope_id;
   return {
+    bookId,
     scope: row.scope,
     scopeId: row.scope_id,
     name: typeof row.name === 'string' ? row.name : normalized.name,
@@ -399,6 +405,7 @@ function toWorldBookRecord(row: WorldBookRow): WorldBookRecord | null {
     // 列只是导入时的缓存：书里条数才是这份 JSON 的真相，两者不一致时信 JSON
     entryCount: normalized.entries.length,
     importedAt: row.imported_at,
+    enabled: Number(row.enabled) !== 0,
   };
 }
 
@@ -1610,20 +1617,16 @@ export function createRepositories(
     },
   };
 
-  const worldBooks: WorldBookStore = {
-    async get(key: ScopedKey): Promise<WorldBookRecord | null> {
-      // 没有行 = 这一层没导入过，由 core 继续往下找；仓储不替 core 决定回退到哪一层
-      const row = await db
-        .prepare('SELECT scope, scope_id, name, book_json, entry_count, imported_at FROM world_books WHERE scope = ? AND scope_id = ?')
-        .bind(key.scope, key.scopeId)
-        .first<WorldBookRow>();
-      return row === null ? null : toWorldBookRecord(row);
-    },
+  const WORLD_BOOK_COLUMNS =
+    'book_id, scope, scope_id, name, book_json, entry_count, enabled, imported_at';
 
+  const worldBooks: WorldBookStore = {
     async list(): Promise<WorldBookRecord[]> {
-      // 排序钉在 (scope, scope_id) 升序：后台三层的渲染顺序因此稳定
+      // 排序钉在 (scope, scope_id, imported_at, book_id)：同层多本按导入先后排，后台渲染顺序稳定
       const { results } = await db
-        .prepare('SELECT scope, scope_id, name, book_json, entry_count, imported_at FROM world_books ORDER BY scope ASC, scope_id ASC')
+        .prepare(
+          'SELECT ' + WORLD_BOOK_COLUMNS + ' FROM world_books ORDER BY scope ASC, scope_id ASC, imported_at ASC, book_id ASC',
+        )
         .all<WorldBookRow>();
       const out: WorldBookRecord[] = [];
       for (const row of results ?? []) {
@@ -1633,48 +1636,87 @@ export function createRepositories(
       return out;
     },
 
-    async put(input: { scope: Scope; scopeId: string; name: string; book: WorldBook }): Promise<WorldBookRecord> {
-      // 一层一本：整本覆盖，旧条目一条不留——半本旧书混进新书比丢掉旧书更难查
+    async get(bookId: string): Promise<WorldBookRecord | null> {
+      const row = await db
+        .prepare('SELECT ' + WORLD_BOOK_COLUMNS + ' FROM world_books WHERE book_id = ?')
+        .bind(bookId)
+        .first<WorldBookRow>();
+      return row === null ? null : toWorldBookRecord(row);
+    },
+
+    async create(input: { scope: Scope; scopeId: string; name: string; book: WorldBook }): Promise<WorldBookRecord> {
+      // 每本一个稳定 id：条目 id 只在书内唯一，粘性/冷却靠 (book_id, entry_id) 记账
       const importedAt = nowIso();
       const entryCount = input.book.entries.length;
+      const bookId = crypto.randomUUID();
       await db
         .prepare(
-          `INSERT INTO world_books (scope, scope_id, name, book_json, entry_count, imported_at) VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT (scope, scope_id) DO UPDATE SET
-             name = excluded.name,
-             book_json = excluded.book_json,
-             entry_count = excluded.entry_count,
-             imported_at = excluded.imported_at`,
+          'INSERT INTO world_books (' + WORLD_BOOK_COLUMNS + ') VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         )
-        .bind(input.scope, input.scopeId, input.name, JSON.stringify(input.book), entryCount, importedAt)
+        .bind(bookId, input.scope, input.scopeId, input.name, JSON.stringify(input.book), entryCount, 1, importedAt)
         .run();
-      // 回写手里的这份，不再查一次库：落库的就是这几个值
       return {
+        bookId,
         scope: input.scope,
         scopeId: input.scopeId,
         name: input.name,
         book: input.book,
         entryCount,
         importedAt,
+        enabled: true,
       };
     },
 
-    async remove(key: ScopedKey): Promise<void> {
-      // 删掉 = 这一层没有世界书，读侧落回上一层；命中 0 行也算成功
-      await db
-        .prepare('DELETE FROM world_books WHERE scope = ? AND scope_id = ?')
-        .bind(key.scope, key.scopeId)
-        .run();
+    async update(input: {
+      bookId: string;
+      name?: string;
+      book?: WorldBook;
+      enabled?: boolean;
+    }): Promise<WorldBookRecord | null> {
+      // 局部更新：没给的列一个都不碰；空改动也回一次当前行，调用方不用分两套逻辑
+      const sets: string[] = [];
+      const values: (string | number)[] = [];
+      if (input.name !== undefined) {
+        sets.push('name = ?');
+        values.push(input.name);
+      }
+      if (input.book !== undefined) {
+        sets.push('book_json = ?', 'entry_count = ?');
+        values.push(JSON.stringify(input.book), input.book.entries.length);
+      }
+      if (input.enabled !== undefined) {
+        sets.push('enabled = ?');
+        values.push(input.enabled ? 1 : 0);
+      }
+      if (sets.length > 0) {
+        await db
+          .prepare('UPDATE world_books SET ' + sets.join(', ') + ' WHERE book_id = ?')
+          .bind(...values, input.bookId)
+          .run();
+      }
+      const row = await db
+        .prepare('SELECT ' + WORLD_BOOK_COLUMNS + ' FROM world_books WHERE book_id = ?')
+        .bind(input.bookId)
+        .first<WorldBookRow>();
+      return row === null ? null : toWorldBookRecord(row);
+    },
+
+    async remove(bookId: string): Promise<void> {
+      // 删书连它的粘性/冷却一起删：记账的 book_id 下次导入也不会复用，留着就是死行
+      await db.batch([
+        db.prepare('DELETE FROM world_books WHERE book_id = ?').bind(bookId),
+        db.prepare('DELETE FROM world_book_state WHERE book_id = ?').bind(bookId),
+      ]);
     },
   };
 
-  // 粘性/冷却记账：按 (guild, channel, entry) 一张薄表，服务端每轮整份覆盖写
+  // 粘性/冷却记账：按 (guild, channel, book, entry) 一张薄表，服务端每轮整份覆盖写
   const worldBookState: WorldBookStateStore = {
     async load(guildId: string, channelId: string): Promise<WorldEntryState[]> {
-      // 固定按 entry_id 升序：同一条书的两份账读回来顺序一致，上层比对不会因顺序抖动而重写
+      // 固定按 (book_id, entry_id) 升序：同一份账读回来顺序一致，上层比对不会因顺序抖动而重写
       const { results } = await db
         .prepare(
-          'SELECT entry_id, sticky_until, cooldown_until FROM world_book_state WHERE guild_id = ? AND channel_id = ? ORDER BY entry_id ASC',
+          'SELECT book_id, entry_id, sticky_until, cooldown_until FROM world_book_state WHERE guild_id = ? AND channel_id = ? ORDER BY book_id ASC, entry_id ASC',
         )
         .bind(guildId, channelId)
         .all<WorldBookStateRow>();
@@ -1686,6 +1728,7 @@ export function createRepositories(
         const stickyUntil = Number(row.sticky_until);
         const cooldownUntil = Number(row.cooldown_until);
         out.push({
+          bookId: typeof row.book_id === 'string' ? row.book_id : '',
           entryId,
           stickyUntil: Number.isFinite(stickyUntil) ? stickyUntil : 0,
           cooldownUntil: Number.isFinite(cooldownUntil) ? cooldownUntil : 0,
@@ -1702,13 +1745,13 @@ export function createRepositories(
         db.prepare('DELETE FROM world_book_state WHERE guild_id = ? AND channel_id = ?').bind(guildId, channelId),
       ];
       for (const row of rows) {
-        if (!Number.isFinite(row.entryId)) continue;
+        if (!Number.isFinite(row.entryId) || row.bookId === '') continue;
         statements.push(
           db
             .prepare(
-              'INSERT INTO world_book_state (guild_id, channel_id, entry_id, sticky_until, cooldown_until, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+              'INSERT INTO world_book_state (guild_id, channel_id, book_id, entry_id, sticky_until, cooldown_until, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
             )
-            .bind(guildId, channelId, row.entryId, row.stickyUntil, row.cooldownUntil, updatedAt),
+            .bind(guildId, channelId, row.bookId, row.entryId, row.stickyUntil, row.cooldownUntil, updatedAt),
         );
       }
       // 一批一个事务：DELETE 和 INSERT 不会只成一半
