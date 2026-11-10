@@ -226,7 +226,7 @@ describe('Node 网关宿主', () => {
     expect(identify.d.token).toBe(BOT_TOKEN);
 
     const lines = logSpy.mock.calls.map((call) => String(call[0]));
-    expect(lines).toContain('[gateway] node host started build=gemini-tags-2');
+    expect(lines).toContain('[gateway] node host started build=memory-stamp-1');
   });
 
   it('op10 之后按 0.9 倍 interval 排心跳（而不是 interval 本身）', async () => {

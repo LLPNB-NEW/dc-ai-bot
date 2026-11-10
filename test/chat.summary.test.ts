@@ -960,7 +960,7 @@ describe('累计记忆：只追加不重写', () => {
     await harness.service.summarize(KEY);
     const first = harness.store.get(storeKey(KEY))?.summary ?? '';
     expect(first.startsWith('【记忆段】')).toBe(true);
-    expect(first).toContain('10-25 22:40');
+    expect(first).toContain('2026年10月25日22时40分');
     expect(first.endsWith('他喜欢猫。')).toBe(true);
 
     messages.push(stamped(3, '第三句', '2026-10-26T06:30:00.000Z'));
@@ -972,9 +972,9 @@ describe('累计记忆：只追加不重写', () => {
     expect(second.slice(first.length).startsWith('\n\n【记忆段】')).toBe(true);
     expect(second.endsWith('他养了两只猫。')).toBe(true);
     expect(second.match(/【记忆段】/g)).toHaveLength(2);
-    expect(second).toContain('10-26 14:30');
+    expect(second).toContain('2026年10月26日14时30分');
     // 第二段的段头是这一批自己的时间段，不把第一次的起点也抄一遍
-    expect(second.slice(first.length)).not.toContain('10-25 22:40');
+    expect(second.slice(first.length)).not.toContain('2026年10月25日22时40分');
     // 第二次请求把已有记忆整份当参考送过去
     expect(harness.chatRequests[1]?.request.messages[0]?.content).toContain('【已有记忆】\n' + first);
   });
@@ -1048,8 +1048,8 @@ describe('§35 选择性补记：追加一段新记忆、游标一个字节都�
     const saved = harness.store.get(storeKey(KEY));
     expect(saved?.summary).toBe(expected);
     // 段头是这一段自己的覆盖时间段（北京时间 22:10 ~ 22:50），不是「现在」
-    expect(saved?.summary).toContain('10-25 22:10');
-    expect(saved?.summary).toContain('10-25 22:50');
+    expect(saved?.summary).toContain('2026年10月25日22时10分');
+    expect(saved?.summary).toContain('22时50分');
     // 关键是这三行：补记是往回补，不能骗自动总结说这段已经总结过了
     expect(saved?.coveredUntilId).toBe(5);
     expect(saved?.coveredFrom).toBeUndefined();

@@ -3,7 +3,7 @@ import {
   STAMP_OFFSET_MINUTES,
   formatDayMinute,
   formatStamp,
-  roughTimeLabel,
+  momentParts,
   stampPrefix,
   stripStamp,
 } from '../src/core/chat/stamp';
@@ -31,30 +31,34 @@ describe('记忆行的时间戳前缀', () => {
   });
 });
 
-describe('摘要段头用的日期与大概时间', () => {
+describe('摘要段头用的日期与时刻', () => {
   it('formatDayMinute 给出不带方括号的北京时间', () => {
     expect(formatDayMinute('2026-10-26T06:30:00.000Z')).toBe('10-26 14:30');
     expect(formatDayMinute(undefined)).toBe('');
     expect(formatDayMinute('not-a-date')).toBe('');
   });
 
-  it('大概时间按口语读钟点，半小时一档', () => {
-    expect(roughTimeLabel('2026-10-26T06:30:00.000Z')).toBe('下午两点半');
-    expect(roughTimeLabel('2026-10-26T06:05:00.000Z')).toBe('下午两点');
-    expect(roughTimeLabel('2026-10-26T06:59:00.000Z')).toBe('下午两点半');
+  it('momentParts 拆出年月日时分，跨月跨年按北京时间进位', () => {
+    expect(momentParts('2026-10-25T14:40:00.000Z')).toEqual({
+      year: '2026',
+      month: '10',
+      day: '25',
+      hour: '22',
+      minute: '40',
+    });
+    expect(momentParts('2026-12-31T16:30:00.000Z')).toEqual({
+      year: '2027',
+      month: '01',
+      day: '01',
+      hour: '00',
+      minute: '30',
+    });
   });
 
-  it('各个时段的口语说法与 12 小时制读法', () => {
-    expect(roughTimeLabel('2026-10-25T03:00:00.000Z')).toBe('上午十一点');
-    expect(roughTimeLabel('2026-10-25T20:00:00.000Z')).toBe('凌晨四点');
-    expect(roughTimeLabel('2026-10-25T23:00:00.000Z')).toBe('早上七点');
-    expect(roughTimeLabel('2026-10-26T04:00:00.000Z')).toBe('中午十二点');
-    expect(roughTimeLabel('2026-10-26T15:30:00.000Z')).toBe('晚上十一点半');
-  });
-
-  it('解析不了的时刻不给大概时间', () => {
-    expect(roughTimeLabel(undefined)).toBe('');
-    expect(roughTimeLabel('not-a-date')).toBe('');
+  it('解析不了的时刻不给时间段', () => {
+    expect(momentParts(undefined)).toBeNull();
+    expect(momentParts('')).toBeNull();
+    expect(momentParts('not-a-date')).toBeNull();
   });
 });
 

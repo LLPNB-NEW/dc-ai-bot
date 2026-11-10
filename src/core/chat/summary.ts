@@ -1,6 +1,6 @@
 import type { ChatMessage, LlmRequest, ModelRef } from '../types';
 import { withAuthorPrefix } from './line';
-import { formatDayMinute, roughTimeLabel } from './stamp';
+import { momentParts, type MomentParts } from './stamp';
 
 /** 摘要只读这几列：本轮这条还没落库，没有 id 也能进素材 */
 export type SummaryLine = Pick<ChatMessage, 'role' | 'content' | 'author' | 'authorId' | 'createdAt' | 'replyTo'>;
@@ -80,18 +80,27 @@ export function normalizeSummary(raw: string): string {
   return text;
 }
 
+/** `2026年11月10日17时20分` */
+function dateTimeText(parts: MomentParts): string {
+  return parts.year + '年' + parts.month + '月' + parts.day + '日' + parts.hour + '时' + parts.minute + '分';
+}
+
 /**
- * 段头时间段：`（覆盖 10-25 22:40 ~ 10-26 14:30，最后一句约在 10-26 下午两点半）`。
+ * 段头时间段：`（2026年11月10日17时20分-20时54分）`；跨日的那一头带上月日，例 `（2026年11月9日21时36分-11月10日02时10分）`。
  * 用户要的是「这些话是什么时候说的」，所以取被总结消息的落库时刻，跟摘要生成的时刻无关；两头都不知道就整段不出现。
  */
 function coveredMoment(coveredFrom: string | undefined, coveredTo: string | undefined): string {
-  const from = formatDayMinute(coveredFrom);
-  const to = formatDayMinute(coveredTo);
-  if (from === '' && to === '') return '';
-  const rough = to === '' ? '' : roughTimeLabel(coveredTo);
-  const tail = rough === '' ? '' : '，最后一句约在 ' + to.slice(0, 5) + ' ' + rough;
-  if (from === '' || to === '' || from === to) return '（覆盖到 ' + (to !== '' ? to : from) + tail + '）';
-  return '（覆盖 ' + from + ' ~ ' + to + tail + '）';
+  const from = momentParts(coveredFrom);
+  const to = momentParts(coveredTo);
+  if (from === null && to === null) return '';
+  if (from === null || to === null) return '（' + dateTimeText((from ?? to) as MomentParts) + '）';
+  const start = dateTimeText(from);
+  const sameDay = from.year === to.year && from.month === to.month && from.day === to.day;
+  if (sameDay && from.hour === to.hour && from.minute === to.minute) return '（' + start + '）';
+  const end = sameDay
+    ? to.hour + '时' + to.minute + '分'
+    : to.month + '月' + to.day + '日' + to.hour + '时' + to.minute + '分';
+  return '（' + start + '-' + end + '）';
 }
 
 /** 段标记：每段以它开头，切段、按时间挑段都只认这一行 */
