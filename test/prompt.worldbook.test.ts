@@ -3,6 +3,7 @@ import type { ChatMessage, ScopedKey } from '../src/core/types';
 import {
   buildWorldBlock,
   mergeWorldSelections,
+  normalizeWorldBook,
   parseWorldBook,
   readWorldPosition,
   readWorldRole,
@@ -10,6 +11,7 @@ import {
   selectWorldEntries,
   uniqueWorldBookName,
   withWorldDepth,
+  WORLD_BOOK_FALLBACK_NAME,
   WORLD_DEPTH_MAX,
   WORLD_GROUP_WEIGHT_DEFAULT,
   WORLD_POSITIONS,
@@ -938,6 +940,12 @@ describe('uniqueWorldBookName 重名加后缀', () => {
   it('空名字落成未命名世界书，重名同样加后缀', () => {
     expect(uniqueWorldBookName([], '   ')).toBe('未命名世界书');
     expect(uniqueWorldBookName(['未命名世界书'], '')).toBe('未命名世界书（2）');
+  });
+
+  it('老库没存名字：读回归一化时给「未命名世界书」，有名字一个字符都不动', () => {
+    expect(normalizeWorldBook({ name: '', entries: [], ignored: [], warnings: [] }).name).toBe(WORLD_BOOK_FALLBACK_NAME);
+    expect(normalizeWorldBook({ name: '   ', entries: [], ignored: [], warnings: [] }).name).toBe(WORLD_BOOK_FALLBACK_NAME);
+    expect(normalizeWorldBook({ name: ' 江湖设定 ', entries: [], ignored: [], warnings: [] }).name).toBe(' 江湖设定 ');
   });
 });
 

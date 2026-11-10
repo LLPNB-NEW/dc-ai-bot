@@ -109,6 +109,8 @@ export const WORLD_SCAN_DEPTH_MAX = 20;
 export const WORLD_DEPTH_MAX = 50;
 export const WORLD_PROBABILITY_DEFAULT = 100;
 export const WORLD_GROUP_WEIGHT_DEFAULT = 100;
+/** 老库里有书没存名字：后台总得有个可点的标签，重名同样按这个基准加后缀 */
+export const WORLD_BOOK_FALLBACK_NAME = '未命名世界书';
 
 /** 本仓库其余解析器的同款判据：数组也是 object，必须先排掉 */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -432,7 +434,7 @@ export function normalizeWorldBook(book: WorldBook): WorldBook {
   const raw = book as Partial<WorldBook>;
   const nextEntryId = typeof raw.nextEntryId === 'number' && Number.isFinite(raw.nextEntryId) && raw.nextEntryId > 0 ? Math.trunc(raw.nextEntryId) : null;
   return {
-    name: typeof raw.name === 'string' ? raw.name : '',
+    name: typeof raw.name === 'string' && raw.name.trim() !== '' ? raw.name : WORLD_BOOK_FALLBACK_NAME,
     entries: Array.isArray(raw.entries) ? raw.entries.map(normalizeWorldEntry) : [],
     ignored: Array.isArray(raw.ignored) ? raw.ignored : [],
     warnings: Array.isArray(raw.warnings) ? raw.warnings : [],
@@ -459,7 +461,7 @@ export function resolveWorldBooks(
  * 名字后缀只为了后台能分辨，不参与任何匹配。
  */
 export function uniqueWorldBookName(existing: readonly string[], wanted: string): string {
-  const base = wanted.trim() === '' ? '未命名世界书' : wanted.trim();
+  const base = wanted.trim() === '' ? WORLD_BOOK_FALLBACK_NAME : wanted.trim();
   if (!existing.includes(base)) return base;
   for (let index = 2; index <= 999; index += 1) {
     const candidate = base + '（' + String(index) + '）';
