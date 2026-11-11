@@ -5767,6 +5767,7 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
   - After：`_dcai_preview/shots/key-toggle/02-after-keys.png`（提示行；pg / ds 为 ghost「停用」，pgl 为 primary「启用」）。
   - 点击 pgl 的「启用」后：`03-after-enabled.png`（绿色「已启用密钥 本地浏览器 pgl」、badge 变「已启用」、按钮变「停用」）。
   - 浏览器网络记录 `PATCH /api/keys/key-2` body 恰为 `{"enabled":true}`；控制台 0 error。
+- 部署到 203.0.113.10 的 `/opt/dc-ai-bot`（源码备份 `/opt/backup-src-20261111-140452.tar.gz`）：启动日志 `applied=0 skipped=35`、`build=key-toggle-1`、`gateway READY as 小神鲸`；容器内 `/api/health` 200，未登录 `PATCH /api/keys/whatever` 回 401 `UNAUTHORIZED`，新前端 asset 200 且包含「停用只影响路由选择」。
 
 ### 81.5 回滚
 
