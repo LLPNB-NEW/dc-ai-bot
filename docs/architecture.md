@@ -335,6 +335,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService;
 - **注入窗口 = 最近 50 条原文（2026-10-26 四次改口径）**：`loadAll` 仍取该频道全部历史，注入前用 `tailMessages`
   只留最近 50 条（`config.historyMaxMessages`，缺省 `DEFAULT_HISTORY_MAX_MESSAGES = 50`），频道级可配、**≥ 2 无上限**）；注入只由条数决定
   （`memory-nolimit-1` 起那道字符安全阀已去掉，不再从最旧整轮丢，§31.8）。
+  更早的内容由累积记忆兜底（§31）；**库里一条不删**。
 - 写：一轮成功后写入 user 与 assistant 两条。
 - **频道全量记忆**：频道内**所有人**的消息（含未被 @ 的人类发言）都会写入 messages（`shouldRecord` → DO 的
   `#recordMessage`，只写库、不调 REST 也不调模型）；回复判定不变（只在被 @ / 被回复 / 私聊时调模型），
@@ -344,6 +345,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService;
   回复）**后台自动生成一段新记忆**：每次只总结游标**之后**的新对话，产出一段
   `【记忆段】（2026年10月25日22时40分-10月26日14时30分）` 形式的文本，**追加**到该频道
   摘要正文的尾部——老段原文永不改写、永不截断丢失（§31.2）。段头写的是被总结那些话的落库时刻（北京时间）；
+  段头取的是用户发言的时刻，不是摘要生成的时刻（§27）。
   注入 system 时按字数预算**从新到旧**装满：预算 = 频道级 `summaryMaxChars`（500..20000，`0`/缺省 = 默认
   `SUMMARY_MAX_CHARS = 4000`），预算外的老段只留在库里、不进上下文；段内顺序永远是旧→新（§31.3）。
 - 最近 50 条原文与这段累积记忆同时注入（**重复是刻意的**：记忆是压缩过的线索，原文是兜底）；
@@ -514,6 +516,7 @@ Cookie 格式：`base64url(JSON{exp}) + '.' + base64url(HMAC-SHA256(payload, SES
 > **2026-10-26 四次改口径（以本段为准）**：注入侧不再全量——每轮只送**最近 50 条原文**
 > （`DEFAULT_HISTORY_MAX_MESSAGES = 50`，`config.historyMaxMessages` 可覆盖），更早的内容靠摘要兜底；
 > 自动摘要阈值从「20 轮＝40 条」改成「**50 条未总结消息**」（`config.summaryEveryMessages`）；摘要每次生成后
+> 都注入 system。D1 里的消息**永久保留、永不删除**。
 
 ### 17.1 需求口径（已定）
 
@@ -661,6 +664,7 @@ getSummary(key: ChannelKey): Promise<ConversationSummary | null>;
 
 ## 18. 回复链与表情（reaction）
 
+需求：要能看出谁回复谁，也支持贴表情。两条都不改供应商层，也不改 Discord 交互协议（仍是 HTTP Interactions + 渐进编辑）。
 
 ### 18.1 数据契约（§6 增补，已落在 `src/core/types.ts`）
 
@@ -1012,8 +1016,9 @@ export function orderKeysForModel(keys: readonly DecryptedKey[], model: string):
 - 网关侧跑的是同一份 ChatService（Durable Object 内）：GATEWAY_BUILD 递增为 'timeout-3min-1'，[gateway] alarm build=timeout-3min-1 出现才代表 @ 路径也走新逻辑（§13 的换码延迟同样适用）。
 ## 21. 表情选择独立模型
 
+> 需求：贴表情改由单独模型负责。§18 里贴表情的指令由主回复模型自己在正文里写 `[[react:😄]]`；
 > 本段把它拆成一次独立调用：主模型不必再惦记表情，另有一个（通常更便宜的）模型专门决定贴什么。
-> 用户四点选择：①后台新增「表情」页配置；②每轮回复后都问一次、可回答不贴；③主模型与表情模型两边都贴、合并最多 2 个；④表情模型看「对方消息 + 我的回复正文 + 表情清单」。
+> 四点取舍：①后台新增「表情」页配置；②每轮回复后都问一次、可回答不贴；③主模型与表情模型两边都贴、合并最多 2 个；④表情模型看「对方消息 + 我的回复正文 + 表情清单」。
 
 ### 21.1 数据契约（`src/core/types.ts`）
 
@@ -1338,10 +1343,12 @@ export async function describeGuildEmojis(
 
 ### 24.1 需求口径
 
+需求：模型认图仍可能叫不出群里的俗称，后台要能手动添加表情别名。
 
 §23 的认图解决的是「模型看得见图」，解决不了「这个表情其实叫奶龙」——`laugh` 的描述是「黄色胖角色站立掐腰」，
 模型认不出它就是奶龙二创。别名是人工补的那一层：管理员把「奶龙」指到 `laugh`，模型从此两种叫法都认。
 
+三条已定口径：
 
 1. **写进提示词 + 解析层都生效**：清单里同时出现 `:laugh:` 与别名「奶龙」，模型挑表情就能对上号；
    万一它写 `:奶龙:` 或 `[[react:奶龙]]`，解析层也要换得到真正的 `laugh:id`。
@@ -1580,6 +1587,7 @@ export interface AdminAppDeps {
 
 ### 26.1 需求口径
 
+- 需求：自动总结阈值与注入条数都能在后台按频道调整。
 - 访谈结论：**每个频道各自一套**；后台**新增「记忆」页**；自动总结阈值**允许 0 = 关闭**；注入条数**最小 2**；上限当时订的是 500——`memory-nolimit-1` 起两个数字都取消上限（§31.8）。
 - 现状写死两处：`src/workers/index.ts:58` 的 `CHAT_CONFIG = { burstEditIntervalMs: 1200, historyMaxMessages: 50, summaryEveryMessages: 50 }` 与 `src/workers/gateway/durable-object.ts:89` 同形的 `MESSAGE_CHAT_CONFIG`（`burstEditIntervalMs` 这一项后来在 `stream-edit-1` 里删掉了，服务层不再节流，见 §29.7；`historyMaxMessages` 的去向见 §31.8）。
 - core 早已支持这两个字段（`src/core/chat/service.ts:68` `historyMaxMessages?`、`:74` `summaryEveryMessages?`），本版只是把「取值来源」从常量换成 D1。
@@ -1695,6 +1703,8 @@ ALTER TABLE channel_memory_settings ADD COLUMN summary_max_chars INTEGER NOT NUL
 
 ### 27.1 口径
 
+第一版取的是摘要自己的 `updated_at`（上次总结发生的时刻）；
+后来改成取这条摘要覆盖的那批消息的落库时刻。
 所以段头写的是**这条摘要覆盖的那批消息的落库时刻**：一头是最早一条，一头是最晚一条。
 
 `updatedAt` 保留但只给后台看（列表、编辑页、`/summary view`），**不再进提示词**。
@@ -1742,6 +1752,7 @@ ALTER TABLE conversation_summaries ADD COLUMN covered_to TEXT NOT NULL DEFAULT '
 
 ### 28.1 需求口径
 
+需求：一次能贴多个表情，也能指定贴到哪条消息上。
 澄清结论（六项，已定）：
 
 1. 上限 2 → **10**（`MAX_REACTIONS`）。
@@ -1864,6 +1875,7 @@ export interface TurnContext { /* … */ reactionTargets?: ReactionTarget[] }
 
 - 以前：`#handleMessage` 等 `chat.run` 整段返回（线上实测 `ms=22238`，22 秒），再一次性 POST 出去——群里这段时间只有「正在输入」。
 - 现在：**首个 token 到了才建消息**（发的就是正文开头），之后模型边吐边 PATCH 这条消息；**最后那次 PATCH 必然是全文**。
+- 不推空占位：早先那一版先发一条 `…` 再改，群里会先看到一条空的孤零零的省略号；现在改成首个 token 到了才建消息，所以是「有字才发」。
 - 只改观感，不改语义：落库、回复链、贴表情、指令剥离仍按 §18 / §28 走。
 
 ### 29.2 时序（`src/workers/gateway/durable-object.ts` 的 `#openStream`）
@@ -4266,6 +4278,7 @@ const identityBlock =
 
 ### 53.2 为什么
 
+起因是角色卡本身已经交代了身份，再叠一层平台口吻的身份行会与角色卡重复。身份行的措辞是「和你说话的是 X（ID …）；这里：服务器 · 频道；今天 …」，整段都是平台口吻——`preset-4` 及以前它坐在 `system` 天头，`identity-head-1` 去掉 Discord 措辞之后仍然每轮都出现（§52 之前那版）。
 
 问题不在措辞对不对，而在它和角色卡重复、方向还相反：角色卡已经交代「我是谁、这是谁在说话」，再叠一层平台口吻的身份行，等于把模型拽回「你在某个聊天平台上当机器人」的口径——角色演得越像，这层口径越碍事。所以有预设段（尤其导入了角色卡）时整块让位；预设为空时才用它兜底，那时主模型除了这几行没有任何来历。
 
@@ -4867,6 +4880,7 @@ export interface ToolCallDelta {
 
 ### 61.1 要求与决定
 
+于是定下：**长期记忆 = `<recall>`，短期历史 = `<recent>`**（自选，取「最近这一段对话」之意），两段各自成块，不合并成一个大标签。
 
 ### 61.2 拼出来的形状
 
@@ -4930,6 +4944,7 @@ export interface ToolCallDelta {
 
 ### 62.1 要求与两个决定
 
+需求：短期记忆可以手动删除。入口**新开一个「历史」页**（不塞进「记忆」页、也不是只给接口）；删到**库里 + Discord 都删**。
 
 ### 62.2 一条删除走的路
 
@@ -5009,6 +5024,7 @@ export interface ToolCallDelta {
 
 前文各节里写的「现版」一律是各自写作时的口径；现版以本节为准。
 
+需求：后台能手动连续总结长期记忆，一次 500 条，没总结完自动接着来。
 
 后台「摘要」页原本只有「重新总结」，它走 `POST /api/summaries/regenerate`，一次只消化一批；一批的条数由该频道的自动总结阈值决定（`summaryBatchLimit`，`src/core/chat/service.ts:245`，只有阈值不设时才用满 500）。积压几千条时要点几十次、每次等 30–60 秒。这一节记的是「一次 500 条、没完自动接着来」怎么做的。
 
@@ -5419,6 +5435,8 @@ export interface ToolCallDelta {
 
 ### 71.5 预设优先（voice-hint-preset-1）
 
+- 能把语音提示词塞进预设吗？能：上下文模式下预设正文整段进 context 描述体（`composeContextBody([promptParts.before, promptParts.after, …])`，`src/core/chat/context-tool.ts:236`），普通模式下进 `legacySystem`，两条路模型都读得到。
+- 差别在时机：代码注入只在 `voiceHint` 为真（mode 1）时出现、所有预设自动有；预设那句是静态的，每个用到的预设都要自己写。这里选「预设优先」：
   `const presetMentionsVoice = (promptParts.before + '\n' + promptParts.after).includes(VOICE_DIRECTIVE);`
   `const voiceHint = presetMentionsVoice ? '' : renderVoiceHint(ctx.voiceHint);`
 - `VOICE_DIRECTIVE` 来自 `src/core/voice/directive.ts:2`，与 `stripVoiceDirective()` 认的是同一个常量，不会出现「注入用一种写法、剥离认另一种」。
@@ -5498,6 +5516,7 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 ### 75.1 需求口径
 
+需求：段头写成「2026年11月10日17时20分-20时54分」这种年月日时分的形状，不写「xx时xx分起」。
 §27 的段头原来读作 `（覆盖 11-04 00:16 ~ 11-05 08:10，最后一句约在 11-05 早上八点）`：带「覆盖」两个字、用 `~` 连接，还多一句口语钟点。
 
 ### 75.2 决定
@@ -5515,6 +5534,7 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 ### 75.4 老段一次性改写（2026-11-10）
 
+- 需求：老段也统一改成新段头。
 - 范围：线上 `conversation_summaries` 共 14 处段头——频道 `1562164723854610453` 的 13 段（`（覆盖 … ~ …，最后一句约在 …）`），频道 `1560131868094103622` 那唯一一段本来没有段头，按它的 `covered_from`/`covered_to` 补了一段 `（2026年10月26日13时26分-14时57分）`。正文一个字没动。
 - 做法：先 `sqlite3 .backup` 留档 `/opt/dc-ai-bot/data/backup-preheading-20261110T132004Z.sqlite3`，再用一次性 Python（`sqlite3` 模块）就地 UPDATE，正则只匹配 `【记忆段】（覆盖 …）` 与 `【记忆段】（覆盖到 …）` 两种形状，其余字原样带过。
 - 核对：改完 `grep '覆盖 '` 为 0，全库记忆正文 27,555 → 27,323 字（少了「覆盖」「~」「最后一句约在」这些字与旧段头），13 段的顺序与正文比对未变。
@@ -5555,6 +5575,7 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 ### 78.1 需求与决定
 
+需求：世界书既可以导入，也可以在后台新建条目。
 
 三个决定（同轮访谈确认）：
 
@@ -5591,9 +5612,12 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 ### 79.1 需求与决定
 
+需求：一个频道、服务器、全局都可以放多本世界书。定下的口径：
 
+- **层内多本各自独立，不合并**：每本有自己的条目、组、概率与粘性/冷却，启用的书全部同时参与装配。
 - **导入永远是新增一本**：不再整层覆盖。同层重名不覆盖，由 `uniqueWorldBookName` 加「（2）」…「（999）」后缀区分；后缀只给后台看，不参与任何匹配。
 - **层间仍然互斥**：`channel > guild > global`，该层只要有一本启用的书就整层用这一层；这一层的书全停用才落到下一层。没有做酒馆那种 global 角色书与聊天书叠加。
+- **取消 4000 字注入上限**：旧的 `WORLD_BLOCK_MAX_CHARS` 预算整段删除，单条正文也不截断。
 
 ### 79.2 数据与迁移
 
@@ -5650,6 +5674,7 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 ### 80.1 需求与范围
 
+- 需求：给世界书加改名能力。
 - 每层每本书的操作区从「+ 新建条目 / 删除本书」扩成「+ 新建条目 / 重命名 / 删除本书」；重命名只改这一本的书名。
 - 不做：条目改名、批量重命名、重名阻止。重名允许（一行一本按 `bookId` 区分）；导入时 `uniqueWorldBookName` 仍会自动加「（2）」。
 
