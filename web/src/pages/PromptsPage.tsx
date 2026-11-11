@@ -54,6 +54,7 @@ import {
   normalizeScopeId,
   parseOptionalNumber,
   previewPromptDefault,
+  renameWorldBook,
   savePromptDefault,
   savePromptInjection,
   saveWorldBookEntry,
@@ -559,6 +560,11 @@ export default function PromptsPage() {
   const [worldBookExpandedId, setWorldBookExpandedId] = useState<string | null>(null);
   // 正在 PATCH 整本开关的那一本：只锁这一行的开关，别的书还能操作。
   const [worldBookTogglingId, setWorldBookTogglingId] = useState<string | null>(null);
+  // 重命名：一次只开一行；打开时把当前书名填进输入框，保存成功只换这一行的 name。
+  const [worldBookRenameId, setWorldBookRenameId] = useState<string | null>(null);
+  const [worldBookRenameName, setWorldBookRenameName] = useState('');
+  const [worldBookRenameError, setWorldBookRenameError] = useState('');
+  const [worldBookRenameBusy, setWorldBookRenameBusy] = useState(false);
   // 逐条编辑：列表只有摘要，正文要打开时现读一条；表单期间不重拉整表，免得冲掉没保存的改动。
   // bookId 与条目 id 一起记：条目 id 只在书内唯一，缺了书就不知道该写哪一本。
   const [worldBookEditBookId, setWorldBookEditBookId] = useState<string | null>(null);
@@ -1239,6 +1245,7 @@ export default function PromptsPage() {
 
   function selectWorldBookLayer(scope: Scope): void {
     resetWorldBookEdit();
+    resetWorldBookRename();
     setWorldBookScope(scope);
     setWorldBookExpandedId(null);
     setWorldBookError('');
@@ -1248,6 +1255,7 @@ export default function PromptsPage() {
 
   function selectWorldBookTarget(value: string): void {
     resetWorldBookEdit();
+    resetWorldBookRename();
     setWorldBookTargetIds({ ...worldBookTargetIds, [worldBookScope]: value });
     setWorldBookExpandedId(null);
     setWorldBookError('');
@@ -1296,6 +1304,7 @@ export default function PromptsPage() {
       setWorldBookResult(result);
       // 换书后旧条目 id 已作废，编辑区要收起；展开刚导进来的那本，让人马上看到条目。
       resetWorldBookEdit();
+      resetWorldBookRename();
       setWorldBookExpandedId(result.bookId === '' ? null : result.bookId);
       await loadWorldBooks();
       setWorldBookMessage('已新增世界书「' + (result.name === '' ? '未命名' : result.name) + '」');
@@ -1329,6 +1338,55 @@ export default function PromptsPage() {
     }
   }
 
+  // 重命名：收起就丢草稿；换层 / 换对象、导入与删书成功、新建成功后都由调用方收起。
+  function resetWorldBookRename(): void {
+    setWorldBookRenameId(null);
+    setWorldBookRenameName('');
+    setWorldBookRenameError('');
+    setWorldBookRenameBusy(false);
+  }
+
+  function openWorldBookRename(book: WorldBook): void {
+    if (worldBookRenameBusy) return;
+    // 再点同一本就是收起；换一本就把草稿换成那本当前的书名。
+    if (worldBookRenameId === book.bookId) {
+      resetWorldBookRename();
+      return;
+    }
+    setWorldBookRenameId(book.bookId);
+    setWorldBookRenameName(book.name);
+    setWorldBookRenameError('');
+    setWorldBookError('');
+  }
+
+  async function saveWorldBookRename(book: WorldBook): Promise<void> {
+    if (worldBookRenameBusy) return;
+    const trimmed = worldBookRenameName.trim();
+    // 与后端 BAD_BOOK_NAME 同口径：trim 后 1..80 字，先在本地说清，不发请求。
+    if (trimmed === '' || trimmed.length > WORLD_BOOK_NAME_MAX) {
+      setWorldBookRenameError(WORLD_BOOK_NAME_RULE);
+      return;
+    }
+    setWorldBookRenameBusy(true);
+    setWorldBookRenameError('');
+    try {
+      const renamed = await renameWorldBook(book.bookId, trimmed);
+      // 只换这一行的书名：别的书、别的层、展开状态都不动，也不重拉整表。
+      setWorldBooks((current) =>
+        current === null
+          ? current
+          : current.map((item) => (item.bookId === book.bookId ? { ...item, name: renamed.name } : item)),
+      );
+      resetWorldBookRename();
+      setWorldBookMessage('已重命名为「' + renamed.name + '」');
+    } catch (err) {
+      // 失败只写表单：列表保持原样，改了还能再存。
+      setWorldBookRenameError(describeWorldBookEntryError(err));
+    } finally {
+      setWorldBookRenameBusy(false);
+    }
+  }
+
   async function removeWorldBook(book: WorldBook): Promise<void> {
     if (worldBookBusy || worldBookTogglingId !== null) return;
     const targetLabel = describeScopeTarget(worldBookScope, worldBookTargetId);
@@ -1347,6 +1405,7 @@ export default function PromptsPage() {
     try {
       await deleteWorldBook(book.bookId);
       if (worldBookEditBookId === book.bookId || worldBookCreateBookId === book.bookId) resetWorldBookEdit();
+      resetWorldBookRename();
       if (worldBookExpandedId === book.bookId) setWorldBookExpandedId(null);
       await loadWorldBooks();
       setWorldBookMessage('已删除「' + name + '」：只删了这一本，同层其它书还在');
@@ -1379,6 +1438,8 @@ export default function PromptsPage() {
       }
       if (result.removedBook) {
         if (worldBookExpandedId === book.bookId) setWorldBookExpandedId(null);
+        // 整本被移除：为它打开的重命名表单已经没有行可落，直接收起。
+        if (worldBookRenameId === book.bookId) resetWorldBookRename();
       }
       await loadWorldBooks();
       setWorldBookMessage(
@@ -1524,6 +1585,7 @@ export default function PromptsPage() {
         // 新建可能顺带建了一本书：书名、条目数、整表状态都变了，重读后展开刚写进去的那本。
         const targetBookId = created.bookId === '' ? createBookId : created.bookId;
         resetWorldBookEdit();
+        resetWorldBookRename();
         await loadWorldBooks();
         if (targetBookId !== null) setWorldBookExpandedId(targetBookId);
         const label = created.entry.name.trim() === '' ? '无名条目' : created.entry.name.trim();
@@ -1596,6 +1658,45 @@ export default function PromptsPage() {
           ))
         )}
       </div>
+    );
+  }
+
+  // 行内重命名：一条窄表单贴着这一本展开；错误留在表单里，不往卡片顶部堆。
+  function renderWorldBookRename(book: WorldBook): ReactElement {
+    return (
+      <form
+        className="worldbook-rename"
+        noValidate
+        onSubmit={(event) => {
+          event.preventDefault();
+          void saveWorldBookRename(book);
+        }}
+      >
+        <div className="worldbook-rename-row">
+          <label className="field">
+            <span>新的书名（{String(WORLD_BOOK_NAME_MAX)} 字以内，只改这一本，条目不动）</span>
+            <input
+              type="text"
+              value={worldBookRenameName}
+              maxLength={WORLD_BOOK_NAME_MAX}
+              disabled={worldBookRenameBusy}
+              onChange={(event) => {
+                setWorldBookRenameName(event.target.value);
+                setWorldBookRenameError('');
+              }}
+            />
+          </label>
+          <div className="actions">
+            <button type="submit" className="primary small" disabled={worldBookRenameBusy}>
+              {worldBookRenameBusy ? '保存中…' : '保存'}
+            </button>
+            <button type="button" className="ghost small" disabled={worldBookRenameBusy} onClick={resetWorldBookRename}>
+              取消
+            </button>
+          </div>
+        </div>
+        {worldBookRenameError === '' ? null : <p className="error">{worldBookRenameError}</p>}
+      </form>
     );
   }
 
@@ -2627,6 +2728,7 @@ export default function PromptsPage() {
                 const expanded = worldBookExpandedId === book.bookId;
                 const editingHere = worldBookEditBookId === book.bookId && worldBookEditId !== null;
                 const creatingHere = worldBookCreating && worldBookCreateBookId === book.bookId;
+                const renamingHere = worldBookRenameId === book.bookId;
                 return (
                   <div className={book.enabled ? 'worldbook-book' : 'worldbook-book off'} key={book.bookId}>
                     <div className="worldbook-book-head">
@@ -2667,6 +2769,14 @@ export default function PromptsPage() {
                         </button>
                         <button
                           type="button"
+                          className="link small"
+                          disabled={worldBookBusy || worldBookEditBusy}
+                          onClick={() => openWorldBookRename(book)}
+                        >
+                          {renamingHere ? '收起重命名' : '重命名'}
+                        </button>
+                        <button
+                          type="button"
                           className="link small danger"
                           disabled={worldBookBusy}
                           onClick={() => void removeWorldBook(book)}
@@ -2675,6 +2785,7 @@ export default function PromptsPage() {
                         </button>
                       </span>
                     </div>
+                    {renamingHere ? renderWorldBookRename(book) : null}
                     {expanded ? (
                       <>
                         {renderWorldBookEntries(book)}

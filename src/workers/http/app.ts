@@ -1322,7 +1322,7 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     return c.json({ ok: true });
   });
 
-  // 整本开关：停用只是不参与装配，书还留在库里，随时可以再开
+  // 整本改动：enabled 切开关、name 改名，两个字段可以一起给；停用只是不参与装配，书还留在库里
   app.patch('/api/world-book', async (c) => {
     const store = deps.worldBooks;
     if (store === undefined) return c.json({ error: 'WORLDBOOK_UNAVAILABLE' }, 501);
@@ -1330,12 +1330,22 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     if (body === null) return badRequest(c);
     const bookId = readWorldBookId(body['bookId']);
     if (bookId === null) return c.json({ error: 'BAD_BOOK_ID' }, 400);
-    const enabled = body['enabled'];
-    if (typeof enabled !== 'boolean') return c.json({ error: 'BAD_BOOK_ENABLED' }, 400);
 
-    const saved = await store.update({ bookId, enabled });
+    const rawEnabled = body['enabled'];
+    const rawName = body['name'];
+    if (rawEnabled === undefined && rawName === undefined) return c.json({ error: 'BAD_BOOK_UPDATE' }, 400);
+    if (rawEnabled !== undefined && typeof rawEnabled !== 'boolean') return c.json({ error: 'BAD_BOOK_ENABLED' }, 400);
+    let name: string | undefined;
+    if (rawName !== undefined) {
+      if (typeof rawName !== 'string') return c.json({ error: 'BAD_BOOK_NAME' }, 400);
+      const wanted = rawName.trim();
+      if (wanted === '' || wanted.length > WORLD_BOOK_NAME_MAX) return c.json({ error: 'BAD_BOOK_NAME' }, 400);
+      name = wanted;
+    }
+
+    const saved = await store.update({ bookId, enabled: rawEnabled as boolean | undefined, name });
     if (saved === null) return c.json({ error: 'WORLD_BOOK_NOT_FOUND' }, 404);
-    return c.json({ bookId: saved.bookId, enabled: saved.enabled });
+    return c.json({ bookId: saved.bookId, name: saved.name, enabled: saved.enabled });
   });
 
   // 单条读取：列表为了截断不回正文，编辑弹窗要正文就只能按 bookId + id 单取一条

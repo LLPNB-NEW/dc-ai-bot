@@ -3417,6 +3417,28 @@ export async function updateWorldBookEnabled(
 }
 
 /**
+ * 契约 world-book：PATCH /api/world-book body { bookId, name } 只改这一本的书名。
+ * name 在这里 trim（后端同样 trim，空 / 超 80 字回 BAD_BOOK_NAME）；回执缺 name / enabled 就是坏回执。
+ */
+export async function renameWorldBook(
+  bookId: string,
+  name: string,
+): Promise<{ bookId: string; name: string; enabled: boolean }> {
+  const raw = await request<unknown>('PATCH', '/api/world-book', { bookId, name: name.trim() });
+  const source = toRecord(raw);
+  const renamed = typeof source.name === 'string' ? source.name : '';
+  // 书名只有后端说了算：回执里没有它（或只有空白）就没法更新列表，别拿请求值顶上。
+  if (renamed.trim() === '' || typeof source.enabled !== 'boolean') {
+    throw new ApiError(0, { error: 'BAD_RESPONSE' }, '重命名成功，但接口回的形状不认识');
+  }
+  return {
+    bookId: typeof source.bookId === 'string' && source.bookId !== '' ? source.bookId : bookId,
+    name: renamed,
+    enabled: source.enabled,
+  };
+}
+
+/**
  * 契约 world-book：GET /api/world-book/entry?bookId&id 回 { entry }（含正文）。
  * 条目 id 只在书内唯一，bookId 才是定位键；404 WORLD_BOOK_NOT_FOUND / WORLD_ENTRY_NOT_FOUND 交给 describeWorldBookEntryError。
  */
@@ -3548,6 +3570,9 @@ export function describeWorldBookEntryError(error: unknown): string {
     }
     if (error.code === 'BAD_BOOK_ENABLED') {
       return '整本开关只接受开 / 关两种值（400）：刷新页面后再试';
+    }
+    if (error.code === 'BAD_BOOK_UPDATE') {
+      return '这次没改到任何东西（400）：enabled 与 name 至少要给一个';
     }
     if (error.code === 'WORLD_BOOK_NOT_FOUND') {
       return '这本书不见了（404）：可能刚被删除，刷新后再试';

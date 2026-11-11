@@ -1752,6 +1752,37 @@ fieldset.fallbacks legend {
   margin: 10px 12px 12px;
 }
 
+/* 行内重命名：贴在这本书下面的一条窄表单，不弹窗也不挡列表 */
+.page.prompts .worldbook-book .worldbook-rename {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.page.prompts .worldbook-book .worldbook-rename-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 10px;
+}
+
+.page.prompts .worldbook-book .worldbook-rename .field {
+  flex: 1 1 320px;
+  max-width: 520px;
+  margin-bottom: 0;
+}
+
+.page.prompts .worldbook-book .worldbook-rename .actions {
+  margin-top: 0;
+}
+
+.page.prompts .worldbook-book .worldbook-rename .error {
+  margin: 0;
+}
+
 /* 这一层还没有书：虚线框里给提示与新建入口 */
 .page.prompts .worldbook-empty {
   margin: 10px 0 4px;

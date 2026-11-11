@@ -278,14 +278,14 @@ describe('admin world book list and import', () => {
 
     const off = await send(app, 'PATCH', '/api/world-book', { bookId, enabled: false }, cookie);
     expect(off.status).toBe(200);
-    expect(await off.json()).toEqual({ bookId, enabled: false });
+    expect(await off.json()).toEqual({ bookId, name: '测试世界书', enabled: false });
     expect((await itemsOf(app, cookie)).map((item) => [item.enabled, item.entryCount])).toEqual([[false, 2]]);
     // 停用只是不参与装配：书与条目都还在，单条照读
     expect((await singleOf(app, cookie, bookId, '0')).status).toBe(200);
 
     const on = await send(app, 'PATCH', '/api/world-book', { bookId, enabled: true }, cookie);
     expect(on.status).toBe(200);
-    expect(await on.json()).toEqual({ bookId, enabled: true });
+    expect(await on.json()).toEqual({ bookId, name: '测试世界书', enabled: true });
     expect((await itemsOf(app, cookie)).map((item) => item.enabled)).toEqual([true]);
 
     const row = await env.DB.prepare('SELECT enabled, entry_count FROM world_books').first<{ enabled: number; entry_count: number }>();
@@ -302,11 +302,16 @@ describe('admin world book list and import', () => {
     expect(badId.status).toBe(400);
     expect(await badId.json()).toEqual({ error: 'BAD_BOOK_ID' });
 
-    for (const enabled of ['yes', 1, 0, null, undefined]) {
+    for (const enabled of ['yes', 1, 0, null]) {
       const res = await send(app, 'PATCH', '/api/world-book', { bookId, enabled }, cookie);
       expect(res.status).toBe(400);
       expect(await res.json()).toEqual({ error: 'BAD_BOOK_ENABLED' });
     }
+
+    // 两个字段都不给不算合法更新：不猜调用方想干什么
+    const empty = await send(app, 'PATCH', '/api/world-book', { bookId }, cookie);
+    expect(empty.status).toBe(400);
+    expect(await empty.json()).toEqual({ error: 'BAD_BOOK_UPDATE' });
 
     const missing = await send(app, 'PATCH', '/api/world-book', { bookId: '没这本书', enabled: false }, cookie);
     expect(missing.status).toBe(404);
@@ -314,6 +319,42 @@ describe('admin world book list and import', () => {
 
     // 被拒的请求一次都没写
     expect((await itemsOf(app, cookie)).map((item) => item.enabled)).toEqual([true]);
+  });
+
+  it('PATCH 改名：trim 后落库，条目一字不动；enabled 可以同时改', async () => {
+    const { app, cookie } = await setup();
+    const imported = await importBook(app, cookie, { scope: 'global', book: rawBook('旧名字', [DRAGON, WHALE]) });
+    const bookId = bookIdOf(imported);
+
+    const res = await send(app, 'PATCH', '/api/world-book', { bookId, name: '  新名字  ' }, cookie);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ bookId, name: '新名字', enabled: true });
+    expect((await itemsOf(app, cookie)).map((item) => [item.name, item.entryCount])).toEqual([['新名字', 2]]);
+    expect((await singleOf(app, cookie, bookId, '0')).body['entry']).toMatchObject({ id: 0, name: '火龙设定' });
+
+    const both = await send(app, 'PATCH', '/api/world-book', { bookId, name: '停用后改名', enabled: false }, cookie);
+    expect(both.status).toBe(200);
+    expect(await both.json()).toEqual({ bookId, name: '停用后改名', enabled: false });
+    const row = await env.DB.prepare('SELECT name, enabled, entry_count FROM world_books WHERE book_id = ?')
+      .bind(bookId)
+      .first<{ name: string; enabled: number; entry_count: number }>();
+    expect(row).toEqual({ name: '停用后改名', enabled: 0, entry_count: 2 });
+  });
+
+  it('PATCH 改名错误：空 / 超长 / 非字符串 400 BAD_BOOK_NAME，书不存在 404，原名不动', async () => {
+    const { app, cookie } = await setup();
+    const imported = await importBook(app, cookie, { scope: 'global', book: rawBook('原名', [DRAGON]) });
+    const bookId = bookIdOf(imported);
+
+    for (const name of ['', '   ', 'x'.repeat(81), 42, null]) {
+      const res = await send(app, 'PATCH', '/api/world-book', { bookId, name }, cookie);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'BAD_BOOK_NAME' });
+    }
+    const missing = await send(app, 'PATCH', '/api/world-book', { bookId: '没这本书', name: '新名字' }, cookie);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: 'WORLD_BOOK_NOT_FOUND' });
+    expect((await itemsOf(app, cookie)).map((item) => item.name)).toEqual(['原名']);
   });
 
   it('库里坏行当这本书不存在：坏 JSON / 形状不对都不出现在 GET，也不占下一本的名字', async () => {

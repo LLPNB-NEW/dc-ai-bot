@@ -8,6 +8,7 @@ import {
   describeWorldBookEntryError,
   fetchWorldBook,
   importWorldBook,
+  renameWorldBook,
   updateWorldBookEnabled,
 } from './api';
 import type { WorldBookEntry } from './api';
@@ -168,6 +169,46 @@ describe('web 侧整本开关 / 删除整本（PATCH / DELETE /api/world-book）
 
     expect(describeWorldBookEntryError(badId)).toContain('bookId 不合法');
     expect(describeWorldBookEntryError(badEnabled)).toContain('整本开关只接受');
+  });
+});
+
+describe('web 侧整本书重命名（PATCH /api/world-book）', () => {
+  it('PATCH body 只有 { bookId, name }，name 发 trim 后的值并带 JSON content-type', async () => {
+    const calls = stubFetch({ bookId: BOOK_A, name: '新名字', enabled: true });
+
+    const result = await renameWorldBook(BOOK_A, '  新名字  ');
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].path).toBe('/api/world-book');
+    expect(calls[0].init.method).toBe('PATCH');
+    expect(bodyOf(calls[0])).toEqual({ bookId: BOOK_A, name: '新名字' });
+    expect(new Headers(calls[0].init.headers).get('content-type')).toBe('application/json');
+    expect(result).toEqual({ bookId: BOOK_A, name: '新名字', enabled: true });
+  });
+
+  it('回执缺 name / enabled：抛 BAD_RESPONSE，不拿请求值顶上', async () => {
+    stubFetch({ bookId: BOOK_A, enabled: true });
+
+    const failure = await renameWorldBook(BOOK_A, '新名字').catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).payload).toEqual({ error: 'BAD_RESPONSE' });
+    expect((failure as ApiError).message).toBe('重命名成功，但接口回的形状不认识');
+  });
+
+  it('失败：400 BAD_BOOK_NAME 继续用页面统一那句', async () => {
+    stubFetch({ error: 'BAD_BOOK_NAME' }, 400);
+
+    const failure = await renameWorldBook(BOOK_A, '').catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(describeWorldBookEntryError(failure)).toBe(WORLD_BOOK_NAME_RULE);
+  });
+
+  it('失败：400 BAD_BOOK_UPDATE 有中文文案', () => {
+    const badUpdate = new ApiError(400, { error: 'BAD_BOOK_UPDATE' }, 'BAD_BOOK_UPDATE');
+
+    expect(describeWorldBookEntryError(badUpdate)).toContain('至少要给一个');
   });
 });
 

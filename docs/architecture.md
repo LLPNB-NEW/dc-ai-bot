@@ -4134,16 +4134,16 @@ judge 的产出要过逐字校验，共有四种结局：
 | --- | --- |
 | `GET /api/world-book` :1264 | 回 `{ items: [{ scope, scopeId, bookId, name, enabled, entryCount, importedAt, entries }] }`；`entries` 是这本全部条目的摘要（不含正文，`chars` 按码点算） |
 | `POST /api/world-book/import` :1283 | 永远 **新增一本**，不覆盖同层旧书；重名用 `uniqueWorldBookName`（:457）加「（2）」…「（999）」；回 `{ scope, scopeId, bookId, name, entryCount, ignored, warnings, layerCount }` |
-| `PATCH /api/world-book` :1326 | body `{ bookId, enabled }`，只切这一本的开关，回 `{ bookId, enabled }` |
+| `PATCH /api/world-book` :1326 | body `{ bookId, enabled?, name? }`，至少给一个：`enabled` 切开关、`name` 改名（trim 后 1..80 字），只改给出的字段，回 `{ bookId, name, enabled }` |
 | `DELETE /api/world-book` :1313 | body `{ bookId }`，删这一本，同层其它书不动 |
 | `GET /api/world-book/entry` :1342 | query `bookId` + `id`，回单条完整正文 |
 | `PUT /api/world-book/entry` :1360 | body `{ bookId, entry }`，整条替换，其余条目与 `ignored`/`warnings` 原样 |
 | `POST /api/world-book/entry` :1392 | body 带 `bookId` 时直接往这本里加：id 由书里的 `nextEntryId` 计数器给出（只增不减，删掉最大号也不复用；老书没有计数器时取 `max + 1`）。不带 `bookId` 时按 `{ scope, scopeId, bookName, entry }` 新建一本并把这条写进去 |
 | `DELETE /api/world-book/entry` :1459 | body `{ bookId, id }`；删掉最后一条时整本移除，回 `removedBook: true` |
 
-错误码：`501 WORLDBOOK_UNAVAILABLE`；`400 BAD_SCOPE` / `BAD_WORLD_ENTRY`（`detail` 逐项点名）/ `BAD_BOOK_NAME` / `BAD_BOOK_ID` / `BAD_BOOK_ENABLED`；`404 WORLD_BOOK_NOT_FOUND` / `WORLD_ENTRY_NOT_FOUND`。PUT 与 POST 都先校验形状再查库（400 比 404 好定位）。
+错误码：`501 WORLDBOOK_UNAVAILABLE`；`400 BAD_SCOPE` / `BAD_WORLD_ENTRY`（`detail` 逐项点名）/ `BAD_BOOK_NAME` / `BAD_BOOK_ID` / `BAD_BOOK_ENABLED` / `BAD_BOOK_UPDATE`（PATCH 两个字段都没给）；`404 WORLD_BOOK_NOT_FOUND` / `WORLD_ENTRY_NOT_FOUND`。PUT、POST、PATCH 都先校验形状再查库（400 比 404 好定位）。
 
-后台（`web/src/pages/PromptsPage.tsx`）：每层列出全部书，一行一本，带启用勾选、条目数、导入时间、「+ 新建条目」「删除本书」（卡片 :2545，空层 :2609，列表 :2625）；展开一本才显示条目表（:1602）与编辑表单（:1668）。状态与动作：`worldBookList` :1181、`toggleWorldBook` :1309、`removeWorldBook` :1332、`removeWorldBookEntry` :1361、`describeWorldBookOutcome` :230；样式 `web/src/styles.css:1671-1760`。前端接口封装 `web/src/api.ts`：`WorldBook` :3088、`WorldBookImportResult` :3150、`fetchWorldBook` :3351、`importWorldBook` :3366、`deleteWorldBook` :3401、`updateWorldBookEnabled` :3406、`fetchWorldBookEntry` :3423、`saveWorldBookEntry` :3437、`createWorldBookEntry` :3463、`deleteWorldBookEntry` :3501、`describeWorldBookEntryError` :3537。
+后台（`web/src/pages/PromptsPage.tsx`）：每层列出全部书，一行一本，带启用勾选、条目数、导入时间、「+ 新建条目」「重命名」「删除本书」（卡片 :2545，空层 :2609，列表 :2625，按钮组 :2770）；展开一本才显示条目表（:1602）与编辑表单（:1668）。状态与动作：`worldBookList` :1181、`toggleWorldBook` :1309、`removeWorldBook` :1332、`removeWorldBookEntry` :1361、`resetWorldBookRename` :1342、`openWorldBookRename` :1349、`saveWorldBookRename` :1362、`renderWorldBookRename` :1665、`describeWorldBookOutcome` :230；样式 `web/src/styles.css:1671-1800`。前端接口封装 `web/src/api.ts`：`WorldBook` :3088、`WorldBookImportResult` :3150、`fetchWorldBook` :3351、`importWorldBook` :3366、`deleteWorldBook` :3401、`updateWorldBookEnabled` :3406、`renameWorldBook` :3423、`fetchWorldBookEntry` :3445、`saveWorldBookEntry` :3459、`createWorldBookEntry` :3485、`deleteWorldBookEntry` :3523、`describeWorldBookEntryError` :3559。
 
 ### 51.5 限制与已知偏离
 
@@ -5616,7 +5616,7 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 - `GET /api/world-book`（`src/workers/http/app.ts:1264`）回 `items`，每行一本书，`entries` 是全部条目摘要（不含正文）；不再有「一层一项」。
 - `POST /api/world-book/import`（:1283）永远 `create` 一本，回 `bookId` / `name` / `layerCount`；不再有 `replaced`。
-- 新增 `PATCH /api/world-book`（:1326，body `{ bookId, enabled }`）整本开关，与 `DELETE /api/world-book`（:1313，body `{ bookId }`）删一本；旧的无 body 的 `DELETE` 删层写法已不存在。
+- `PATCH /api/world-book`（:1326，body `{ bookId, enabled?, name? }`）整本开关与改名（至少给一个），与 `DELETE /api/world-book`（:1313，body `{ bookId }`）删一本；旧的无 body 的 `DELETE` 删层写法已不存在。
 - 条目路由全部改成按 `bookId` 定位：GET :1342、PUT :1360、POST :1392、DELETE :1459；`POST` 不带 `bookId` 时按 `{ scope, scopeId, bookName, entry }` 新建一本。新条目 id 由 `book_json.nextEntryId` 计数器给出，只增不减；删掉当前最大号再新建也不会复用（粘性/冷却按 `entryId` 记账），老书没有计数器时按 `max + 1`。
 - 错误码补 `400 BAD_BOOK_ID` 与 `400 BAD_BOOK_ENABLED`；其余沿用 §51.4。
 - 后台（`web/src/pages/PromptsPage.tsx`）：每层列出全部书，一行一本，带启用勾选与「+ 新建条目」「删除本书」；展开一本才显示条目表与编辑表单（列表 :2625、空层 :2609、条目表 :1602、表单 :1668）。状态 `worldBookList` :1181、`toggleWorldBook` :1309、`removeWorldBook` :1332、`removeWorldBookEntry` :1361；接口封装 `web/src/api.ts` 的 `WorldBook` :3088、`importWorldBook` :3366、`deleteWorldBook` :3401、`updateWorldBookEnabled` :3406、`createWorldBookEntry` :3463、`deleteWorldBookEntry` :3501。
@@ -5643,3 +5643,47 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 - 代码层回滚：把 `src/workers/gateway/engine.ts:133` 的门牌与镜像退回 `worldbook-crud-1`，再把前端退回上一版构建。**0035 不回滚**——旧代码读新表列名会失败，真要退回单本时代需要恢复 0035 之前的库备份（`/opt/backup-src-<ts>.tar.gz` 是源码备份，不是数据备份；数据备份见 §34）。
 - 行为回滚不必退版本：后台把新导入的书停用或删掉，同层旧书照旧参与；层间选择立刻回到升级前的效果。
+
+## 80. 世界书重命名（worldbook-rename-1，2026-11-11）
+
+世界书的书名原先只有导入时来源给的那一个，导入后改不了；线上那本来自 entries-only JSON 的书只能一直叫「未命名世界书」。这一版让后台可以逐本改名，条目内容、开关、其它书都不动。
+
+### 80.1 需求与范围
+
+- 每层每本书的操作区从「+ 新建条目 / 删除本书」扩成「+ 新建条目 / 重命名 / 删除本书」；重命名只改这一本的书名。
+- 不做：条目改名、批量重命名、重名阻止。重名允许（一行一本按 `bookId` 区分）；导入时 `uniqueWorldBookName` 仍会自动加「（2）」。
+
+### 80.2 接口契约
+
+- `PATCH /api/world-book`（`src/workers/http/app.ts:1326`）body `{ bookId, enabled?, name? }`：
+  - 两个字段都没给 → `400 BAD_BOOK_UPDATE`。
+  - `name` 不是字符串 / trim 后为空 / 超过 `WORLD_BOOK_NAME_MAX`（80）→ `400 BAD_BOOK_NAME`。
+  - `enabled` 给了但不是布尔 → `400 BAD_BOOK_ENABLED`。
+  - 先校验形状再查库（400 比 404 好定位）；书不存在 → `404 WORLD_BOOK_NOT_FOUND`。
+  - 成功调 `store.update({ bookId, enabled, name })`，只改给出的字段，回 `{ bookId, name, enabled }`。
+- 仓储 `worldBooks.update`（`src/workers/db/d1-repository.ts:1673`）本来就是动态 SET，名字与开关无需改 SQL。
+- 测试（`test/worldbook.api.test.ts`，33 例）：开关回执带上 `name`；`{ bookId }` → `BAD_BOOK_UPDATE`；改名 trim 落库且条目一字不动、可与 `enabled` 同时改；空/空白/81 字/数字/null → `BAD_BOOK_NAME`；书不存在 404。
+
+### 80.3 后台
+
+- `web/src/api.ts:3423` `renameWorldBook(bookId, name)`：PATCH body 只有 `{ bookId, name: name.trim() }`；回执 name 非空白且 enabled 是布尔才收，否则抛 `BAD_RESPONSE`「重命名成功，但接口回的形状不认识」。`:3559` 的错误文案补 `BAD_BOOK_UPDATE`。
+- `web/src/pages/PromptsPage.tsx`：状态 `:564`；`resetWorldBookRename` :1342、`openWorldBookRename` :1349、`saveWorldBookRename` :1362、`renderWorldBookRename` :1665；按钮组 :2770，展开时按钮文案变「收起重命名」，表单渲染在 :2788。
+- 表单是行内窄条（不是弹窗）：预填当前书名、`maxLength=80`、本地校验 trim 1..80、保存中全禁用、失败只写行内错误；成功后只 map 该 `bookId` 的 name 并提示「已重命名为「X」」。
+- 切层、换目标、导入成功、删书、删最后一条、新建条目成功都会收起并清空重命名草稿（:1248、:1258、:1307、:1408、:1442、:1588）。
+- 样式 `web/src/styles.css:1756` 起五条 `.worldbook-rename`。
+- 前端测试 `web/src/api.worldbook.test.ts:175` 新增 4 例（body trim、坏回执、BAD_BOOK_NAME 文案、BAD_BOOK_UPDATE 文案），该文件 17 例。
+
+### 80.4 门槛与验证
+
+- `npx tsc --noEmit -p tsconfig.json` → 0。
+- `npm run typecheck:web` → 0。
+- `npx vitest run` → 94 文件 1793 例全过。
+- `npm run test:node` → 9 文件 121 passed | 1 skipped（35 个迁移，本次无新迁移）。
+- `npx vitest run --config vitest.node.config.ts test/gateway.node.test.ts` → 7 例（门牌改 `worldbook-rename-1`）。
+- `npm run build:web` → `index.html` 0.40 kB、`assets/index-Dvap2lnu.css` 25.98 kB、`assets/index-DT1oEsHJ.js` 431.93 kB。
+- 视觉验收（1280×800 深色，同一场景）：Before `_dcai_preview/shots/multi/01-global-two-books.png`（两本书、无「重命名」）；After `_dcai_preview/shots/rename/01-rename-actions.png`（两行都出现「+ 新建条目 / 重命名 / 删除本书」）与 `02-rename-form.png`（第一本下展开预填书名的输入框、「保存」「取消」，按钮变「收起重命名」）。浏览器实测 PATCH body 恰为 `{"bookId":"global-book-1","name":"世界设定集·改"}`，只换该行，控制台 0 error。
+
+### 80.5 回滚
+
+- 无新迁移，回滚只是代码：前端退回 `26793c9` 的构建、门牌退回 `worldbook-multi-1`，旧的 PATCH 开关调用不受影响（服务端仍接受只有 `enabled` 的 body）。
+- 数据不用动：改过的书名留在 `world_books.name`；回滚后旧前端照常显示该名字。
