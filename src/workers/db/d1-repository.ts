@@ -396,11 +396,14 @@ function toWorldBookRecord(row: WorldBookRow): WorldBookRecord | null {
   const normalized = normalizeWorldBook(parsed);
   // book_id 是 0035 起的主键；老行（手工补库）缺它就退化成层内唯一，至少不会三本撞成一个 id
   const bookId = typeof row.book_id === 'string' && row.book_id !== '' ? row.book_id : row.scope + ':' + row.scope_id;
+  // 名字列可能存的是空串（单本时代导 entries-only 的书时没东西可填）：空列不算名字，
+  // 否则归一化补的「未命名世界书」会被一行空串盖掉，后台就出现没有标题的书
+  const columnName = typeof row.name === 'string' ? row.name.trim() : '';
   return {
     bookId,
     scope: row.scope,
     scopeId: row.scope_id,
-    name: typeof row.name === 'string' ? row.name : normalized.name,
+    name: columnName !== '' ? columnName : normalized.name,
     book: normalized,
     // 列只是导入时的缓存：书里条数才是这份 JSON 的真相，两者不一致时信 JSON
     entryCount: normalized.entries.length,

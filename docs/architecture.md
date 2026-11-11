@@ -4154,7 +4154,7 @@ judge 的产出要过逐字校验，共有四种结局：
 5. 没有递归扫描、向量检索、按书覆盖扫描深度；扫描深度是逐条/书级默认值。
 6. 粘性/冷却按 `bookId + entryId` 记账：删掉再导入同一本书算新书，状态清零；同一本书内条目 id 只增不减（计数器存在 `book_json.nextEntryId`），删过的号不会再发给新条目，所以不会串账。
 7. 后台列表回每本全部条目的摘要，正文只在编辑单条时单独取。
-8. 老库里有书没存名字（导入时来源没给名字）：读回归一化统一显示「未命名世界书」，有名字的原样保留，不回写库。
+8. 老库里有书没存名字（导入时来源没给名字）：读回归一化统一显示「未命名世界书」，有名字的原样保留，不回写库。名字列本身是空串时不算名字——否则它会把归一化补的标签盖掉；酒馆导出的 entries-only 文件没有书名，文件名就是书的名字。
 
 ### 51.6 代码地图
 
@@ -5633,7 +5633,7 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 ### 79.6 门槛与验证
 
 - `npx tsc --noEmit -p tsconfig.json` → 0。
-- `npx vitest run` → 94 文件 1786 例全过。
+- `npx vitest run` → 94 文件 1787 例全过。
 - `npm run test:node` → 9 文件 121 passed | 1 skipped（35 个迁移，含 0035）。
 - `npm run typecheck:web` → 0；`npm run build:web` → `index.html` 0.40 kB、`assets/index-f2dbFfPH.css` 25.46 kB、`assets/index-BEB98OTW.js` 429.98 kB。
 - 视觉验收（1280×800 深色）：Before `_dcai_preview/shots/table-with-edit-column.png`（单本、无开关）；After 同目录 `multi/` 五张——01 同层两本一启用一停用、02 停用书可展开、03 往第一本加条目后 4 条、04 删一本另一本还在、05 空层提示。

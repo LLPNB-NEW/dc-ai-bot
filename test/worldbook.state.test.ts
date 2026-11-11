@@ -215,6 +215,18 @@ describe('worldBookState：真实 D1 往返', () => {
     });
   });
 
+  it('名字列是空串的老书：读回来用书里的名字，书里也没有就显示「未命名世界书」', async () => {
+    const unnamed = { name: '', entries: [], ignored: [], warnings: [] };
+    await env.DB.prepare(
+      'INSERT INTO world_books (book_id, scope, scope_id, name, book_json, entry_count, enabled, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    )
+      .bind('global:old', 'global', '', '', JSON.stringify(unnamed), 0, 1, '2026-01-01T00:00:00.000Z')
+      .run();
+    const record = await createRepositories(env.DB, secretBox).worldBooks.get('global:old');
+    expect(record?.name).toBe('未命名世界书');
+    expect(record?.book.name).toBe('未命名世界书');
+  });
+
   it('同一层存两本：list() 两行都在，remove(bookId) 只删指定书与它的记账', async () => {
     const { worldBooks, worldBookState } = createRepositories(env.DB, secretBox);
     const book = { name: '书', entries: [], ignored: [], warnings: [] };
