@@ -1763,6 +1763,19 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     return c.json(keyDto(await deps.keys.create(input)), 201);
   });
 
+  app.patch('/api/keys/:id', async (c) => {
+    // §81：只翻启用位，不动密钥本身；仓储没实现这个能力时明确回 501，不假装改过
+    const setEnabled = deps.keys.setEnabled;
+    if (setEnabled === undefined) return c.json({ error: 'KEY_UPDATE_UNAVAILABLE' }, 501);
+
+    const body = await readJsonBody(c);
+    if (body === null || typeof body['enabled'] !== 'boolean') return c.json({ error: 'BAD_ENABLED' }, 400);
+
+    const saved = await setEnabled.call(deps.keys, c.req.param('id'), body['enabled']);
+    if (saved === null) return c.json({ error: 'NOT_FOUND' }, 404);
+    return c.json(keyDto(saved));
+  });
+
   app.delete('/api/keys/:id', async (c) => {
     await deps.keys.remove(c.req.param('id'));
     return c.json({ ok: true });

@@ -957,6 +957,16 @@ export function createRepositories(
       return created;
     },
 
+    async setEnabled(id: string, enabled: boolean): Promise<ProviderKey | null> {
+      // §81：只翻 enabled 位；明文不参与，回执复用列表同一份白名单字段。
+      await db.prepare('UPDATE provider_keys SET enabled = ? WHERE id = ?').bind(enabled ? 1 : 0, id).run();
+      const row = await db
+        .prepare('SELECT id, provider, label, base_url, ciphertext, key_hint, enabled, created_at, models FROM provider_keys WHERE id = ?')
+        .bind(id)
+        .first<KeyRow>();
+      return row === null ? null : toProviderKey(row);
+    },
+
     async remove(id: string): Promise<void> {
       await db.prepare('DELETE FROM provider_keys WHERE id = ?').bind(id).run();
     },

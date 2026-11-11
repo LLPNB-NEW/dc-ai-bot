@@ -419,6 +419,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages (guild_id, channel_i
 | DELETE | `/api/routes` | `{scope,scopeId}` | 200 |
 | GET | `/api/keys` | — | `{items: ProviderKey[]}`（只含 keyHint） |
 | POST | `/api/keys` | `{provider,label,baseUrl?,apiKey}` | 201 `ProviderKey`（不含明文） |
+| PATCH | `/api/keys/:id` | `{enabled}` | 200 `ProviderKey`（只翻启用位）；400 `BAD_ENABLED` / 404 `NOT_FOUND` / 501 `KEY_UPDATE_UNAVAILABLE`（§81） |
 | DELETE | `/api/keys/:id` | — | 200 |
 | POST | `/api/keys/:id/test` | — | 200 `{ok:true, models:string[]}` / 502 `{ok:false,error}` |
 | GET | `/api/conversations?guildId&channelId&limit` | — | `{items:[{role,content,createdAt}]}` |
@@ -960,6 +961,8 @@ export interface KeyRepository {
     provider: ProviderId; label: string; baseUrl?: string; apiKey: string; models?: string[];
   }): Promise<ProviderKey>;
   remove(id: string): Promise<void>;
+  /** 后台手动启停（§81）；只读/内存仓储可不实现，HTTP 缺方法回 501 */
+  setEnabled?(id: string, enabled: boolean): Promise<ProviderKey | null>;
 }
 ```
 
@@ -1000,12 +1003,14 @@ export function orderKeysForModel(keys: readonly DecryptedKey[], model: string):
 
 - `GET /api/keys`：每项新增 `models: string[]`（`keyDto` 白名单复制，**不得**多带 ciphertext/明文）。
 - `POST /api/keys`：接受 `models?: string[]`；校验 ≤20 项、每项 1..64 字符、字符集 `[\p{L}\p{N}._:*-]`（`app.ts:404` 的 `KEY_MODEL_PATTERN`，带 `u` 标志；逗号与空白永远不收——前者是库里的分隔符）、去重（小写比较）、保存原始大小写；不合法 → `400 { error: 'BAD_MODELS' }`。缺省当作 `[]`（通用）。
+- `PATCH /api/keys/:id`（§81）：body 只接受 `{ enabled: boolean }`；成功只翻 `provider_keys.enabled`，回 `keyDto`（与列表同一白名单，不含 ciphertext/明文）；未知 id → 404 `NOT_FOUND`；body 不是对象或缺布尔 `enabled` → 400 `BAD_ENABLED`；仓储没实现 `setEnabled` → 501 `KEY_UPDATE_UNAVAILABLE`。没有新增迁移。
 - `POST /api/keys/:id/test`（探测）不变。
 
 ### 20.7 前端（`web/src/pages/KeysPage.tsx`）
 
 - 新增输入「适用模型（逗号分隔，留空 = 全部；支持 `deepseek-*` 通配）」，提交时按逗号切开成 `string[]`。
 - 列表行显示 `适用模型：全部` 或 `适用模型：deepseek-*、gpt-4o-mini`。
+- 每行操作区是「启用/停用 / 测试连通性 / 删除」：停用中的 Key 显示 primary「启用」，启用中的显示 ghost「停用」；启停请求进行中时该行的启停、测试与删除都禁用。停用只影响路由，密钥与适用模型都保留。
 
 ### 20.8 已知边界
 
@@ -5712,3 +5717,59 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 
 - 无新迁移，回滚只是代码：前端退回 `26793c9` 的构建、门牌退回 `worldbook-multi-1`，旧的 PATCH 开关调用不受影响（服务端仍接受只有 `enabled` 的 body）。
 - 数据不用动：改过的书名留在 `world_books.name`；回滚后旧前端照常显示该名字。
+
+## 81. 后台手动启用/停用 Key（key-toggle-1，2026-11-11）
+
+原先后台只能新增、测试、删除 Key；临时不想让 bot 用某把 Key（例如本机浏览器登录的临时 Key）只能删掉，恢复时还要重新录入密钥。这一版复用 `provider_keys.enabled`，给每把 Key 一个「启用 / 停用」按钮：停用立即退出路由选择，密钥与适用模型原样保留，随时可以恢复。
+
+### 81.1 数据与仓储
+
+- 无新迁移：`provider_keys.enabled` 自 `migrations/0001_init.sql` 起就存在，默认 1；`create` 一直写 1，`listEnabled` 一直按 `enabled = 1` 查询（`src/workers/db/d1-repository.ts:911`、SQL 在 :914）。停用后下一轮对话立即不再选它，不需要重启或清缓存。
+- `KeyRepository`（`src/core/ports.ts:85`）新增可选方法：
+
+  ```ts
+  setEnabled?(id: string, enabled: boolean): Promise<ProviderKey | null>;
+  ```
+
+  可选是给只读/内存仓储留的退路：没有这个方法时 HTTP 明确回 501，不假装改过；`id` 不存在时回 `null`。
+- D1 实现（`src/workers/db/d1-repository.ts:960`）：先 `UPDATE provider_keys SET enabled = ? WHERE id = ?`（布尔转 1/0），再按列表同一组列 `SELECT` 整行，最后 `toProviderKey`。回执只含 `ProviderKey` 白名单字段，明文与 ciphertext 不参与。
+- 停用不删行、不动 `key_hint`、`ciphertext`、`models`：恢复时只是把位翻回 1。
+
+### 81.2 接口契约
+
+- `PATCH /api/keys/:id`（`src/workers/http/app.ts:1766`）body `{ enabled: boolean }`：
+  - 成功 `200`，回 `keyDto`（`id/provider/label/keyHint/enabled/createdAt/models`，可选 `baseUrl`）。
+  - body 不是 JSON 对象、缺 `enabled`、或 `enabled` 不是布尔 → `400 { error: 'BAD_ENABLED' }`。
+  - `id` 不存在 → `404 { error: 'NOT_FOUND' }`。
+  - 仓储没实现 `setEnabled` → `501 { error: 'KEY_UPDATE_UNAVAILABLE' }`。
+- 校验顺序：先看仓储有没有这个能力，再解析 body，最后查库。缺能力时连 body 都不读，避免给出「参数错了」的假象。
+- 只翻启用位，不提供改 provider/label/baseUrl/models 的能力；那些仍走新增/删除。
+
+### 81.3 后台
+
+- `web/src/api.ts:401` `setKeyEnabled(id, enabled)`：`PATCH /api/keys/<encodeURIComponent(id)>`，body 只有 `{ enabled }`；回执按 `ProviderKeyItem` 解析，`models` 缺省补 `[]`。
+- `web/src/pages/KeysPage.tsx`：状态 `togglingId` :16；`toggleEnabled` :67；提示行 :179；按钮组 :194 起。
+  - 每行操作区顺序是「启用/停用 / 测试连通性 / 删除」。启用中的 Key 显示 ghost「停用」，停用中的显示 primary「启用」；启停请求中，启停按钮显示「处理中…」，该行的测试与删除也一并禁用。
+  - 成功只 `map` 替换该 `id` 的一行，并提示「已启用/停用密钥 <label>」；失败只写错误条，不动列表。
+  - 提示行写明「停用只影响路由选择，不会删除密钥；需要时再点「启用」恢复。」
+- 样式复用现有的 `primary small` / `ghost small` / `danger small`，没有新增 CSS。
+
+### 81.4 门槛与验证
+
+- `npx tsc --noEmit -p tsconfig.json` → 0。
+- `npm run typecheck:web` → 0。
+- `npx vitest run` → 95 文件 1800 例全过（118.5 s）。
+- `npm run test:node` → 9 文件 121 passed | 1 skipped（35 个迁移，本次无新迁移）。
+- `npm run build:web` → `index.html` 0.40 kB、`assets/index-Dvap2lnu.css` 25.98 kB、`assets/index-Da4qhGgj.js` 432.67 kB。
+- 接口/仓储/前端聚焦 53 例（4 文件）：`test/admin.crud.test.ts` 38（含 PATCH 成功/400/404/501 与路由清单）、`test/key.store.test.ts` 6（停用/listEnabled/恢复/未知 id）、`test/admin.auth.test.ts` 6（PATCH 需要登录）、`web/src/api.keys.test.ts` 3（PATCH 形状/缺 models/ ApiError）。另有 `test/gateway.node.test.ts` 7 例单独跑，门牌为 `key-toggle-1`。
+- 视觉验收（真实 headless Chromium，1280×800，深色，同一场景，点击顶部「供应商密钥」）：
+  - Before：`_dcai_preview/shots/key-toggle/01-before-keys.png`（三把 Key，每行只有「测试连通性 / 删除」，无提示行）。
+  - After：`_dcai_preview/shots/key-toggle/02-after-keys.png`（提示行；pg / ds 为 ghost「停用」，pgl 为 primary「启用」）。
+  - 点击 pgl 的「启用」后：`03-after-enabled.png`（绿色「已启用密钥 本地浏览器 pgl」、badge 变「已启用」、按钮变「停用」）。
+  - 浏览器网络记录 `PATCH /api/keys/key-2` body 恰为 `{"enabled":true}`；控制台 0 error。
+
+### 81.5 回滚
+
+- 无新迁移、无数据形状变化，回滚只是代码：前端退回 `worldbook-rename-1` 的构建，`GATEWAY_BUILD` 与镜像退回 `worldbook-rename-1`（`src/workers/gateway/engine.ts:133`）。
+- 已经停用的 Key 不会因为回滚自动恢复；需要时用 `UPDATE provider_keys SET enabled = 1 WHERE id = '<id>';`，或在新版后台点「启用」。
+- 回滚后旧前端仍然读 `GET /api/keys` 的 `enabled` 字段，只是不再有启停按钮。

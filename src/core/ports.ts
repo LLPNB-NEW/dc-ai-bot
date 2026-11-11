@@ -78,6 +78,11 @@ export interface KeyRepository {
     models?: string[];
   }): Promise<ProviderKey>;
   remove(id: string): Promise<void>;
+  /**
+   * 后台手动启停（§81）。只读/内存仓储可以不实现，HTTP 缺这个方法时回 501。
+   * 返回更新后的整条 Key（不含明文），id 不存在回 null。
+   */
+  setEnabled?(id: string, enabled: boolean): Promise<ProviderKey | null>;
 }
 
 export interface ConversationStore {

@@ -99,8 +99,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 secret 生效不需要重新部署，下一次请求即生效；但 isolate 会被新建，进行中的长请求可能用旧值完成。
 
-厂商 API key 的轮换在**后台密钥页**做：新增一把 → 确认 `/chat` 正常 → 删除旧的一把。
-（`provider_keys` 里同一 provider 取"第一条 enabled"，所以新 key 要确保旧 key 被禁用或删除后才会被选中。）
+厂商 API key 的轮换在**后台密钥页**做：新增一把 → 确认 `/chat` 正常 → 停用或删除旧的一把。
+（同一 provider 可以同时启用多把，按适用模型排序后逐把尝试，§20.4；停用立即不再参与选择，密钥本身保留，随时可以在同一行点「启用」恢复。）
 
 ---
 

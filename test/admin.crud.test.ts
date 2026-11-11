@@ -26,6 +26,8 @@ interface AppOptions {
   describeEmojis?: (guildId: string, options?: { force?: boolean }) => Promise<EmojiDescribeResult>;
   /** §24.6：真实表情清单由装配层注入；不传就是「未接线」，live 端点应回 501 */
   listEmojis?: (guildId: string) => Promise<CustomEmoji[]>;
+  /** §81：摘掉 deps.keys.setEnabled，模拟仓储没实现启停（PATCH 应回 501） */
+  dropKeyUpdate?: boolean;
 }
 
 function makeApp(options: AppOptions = {}) {
@@ -42,6 +44,7 @@ function makeApp(options: AppOptions = {}) {
   if (options.probeKey !== undefined) deps.probeKey = options.probeKey;
   if (options.describeEmojis !== undefined) deps.describeEmojis = options.describeEmojis;
   if (options.listEmojis !== undefined) deps.listEmojis = options.listEmojis;
+  if (options.dropKeyUpdate === true) delete deps.keys.setEnabled;
   return createAdminApp(deps);
 }
 
@@ -611,6 +614,77 @@ describe('admin keys', () => {
     const zhRow = await env.DB.prepare("SELECT models FROM provider_keys WHERE label = 'zh'").first<{ models: string }>();
     expect(zhRow?.models).toBe('假流式-pg-gemini-4-argon');
   });
+
+  it('PATCH /api/keys/:id：停用回 enabled=false 且仍不含密钥，DB 落 0；再启用恢复 1', async () => {
+    const { app, cookie } = await setup();
+    const plain = 'sk-live-TOGGLE-2468';
+
+    const created = await jsonOf(
+      await send(app, 'POST', '/api/keys', { provider: 'openai-compat', label: '待停用', apiKey: plain, models: ['deepseek-*'] }, cookie),
+    );
+    const id = String(created.id);
+
+    const off = await send(app, 'PATCH', '/api/keys/' + id, { enabled: false }, cookie);
+    expect(off.status).toBe(200);
+    const offBody = await jsonOf(off);
+    expect(offBody.id).toBe(id);
+    expect(offBody.enabled).toBe(false);
+    // keyDto 白名单：启停回执与列表同一形状，apiKey / ciphertext 进不来
+    expect(Object.keys(offBody).sort()).toEqual(['createdAt', 'enabled', 'id', 'keyHint', 'label', 'models', 'provider']);
+    expect(JSON.stringify(offBody).includes(plain)).toBe(false);
+    expect(JSON.stringify(offBody)).not.toContain('ciphertext');
+
+    // 停用只翻位不删行：列表里还在，enabled 变 false、models 原样
+    const listed = await itemsOf(app, '/api/keys', cookie);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.enabled).toBe(false);
+    expect(listed[0]?.models).toEqual(['deepseek-*']);
+    expect(JSON.stringify(listed)).not.toContain('ciphertext');
+
+    const offRow = await env.DB.prepare('SELECT enabled FROM provider_keys WHERE id = ?').bind(id).first<{ enabled: number }>();
+    expect(offRow?.enabled).toBe(0);
+
+    const on = await send(app, 'PATCH', '/api/keys/' + id, { enabled: true }, cookie);
+    expect(on.status).toBe(200);
+    expect((await jsonOf(on)).enabled).toBe(true);
+    const onRow = await env.DB.prepare('SELECT enabled FROM provider_keys WHERE id = ?').bind(id).first<{ enabled: number }>();
+    expect(onRow?.enabled).toBe(1);
+  });
+
+  it('PATCH /api/keys/:id：400 BAD_ENABLED / 404 NOT_FOUND / 仓储无实现 501', async () => {
+    const { app, cookie } = await setup();
+    const created = await jsonOf(
+      await send(app, 'POST', '/api/keys', { provider: 'anthropic', label: 'k', apiKey: 'sk-ant-toggle-1111' }, cookie),
+    );
+    const id = String(created.id);
+
+    // 没有 enabled、非布尔、显式 null、整个 body 缺省：一律 400，且库里的位一位不动
+    for (const body of [{}, { enabled: 'false' }, { enabled: 1 }, null]) {
+      const res = await send(app, 'PATCH', '/api/keys/' + id, body, cookie);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(await res.json(), JSON.stringify(body)).toEqual({ error: 'BAD_ENABLED' });
+    }
+    const noBody = await send(app, 'PATCH', '/api/keys/' + id, undefined, cookie);
+    expect(noBody.status).toBe(400);
+    expect(await noBody.json()).toEqual({ error: 'BAD_ENABLED' });
+
+    const untouched = await env.DB.prepare('SELECT enabled FROM provider_keys WHERE id = ?').bind(id).first<{ enabled: number }>();
+    expect(untouched?.enabled).toBe(1);
+
+    const missing = await send(app, 'PATCH', '/api/keys/does-not-exist', { enabled: false }, cookie);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: 'NOT_FOUND' });
+    // 未知 id 不凭空造行
+    expect(await itemsOf(app, '/api/keys', cookie)).toHaveLength(1);
+
+    // 仓储没实现 setEnabled：501，且不假装改过
+    const offline = await setup({ dropKeyUpdate: true });
+    const unavailable = await send(offline.app, 'PATCH', '/api/keys/' + id, { enabled: false }, offline.cookie);
+    expect(unavailable.status).toBe(501);
+    expect(await unavailable.json()).toEqual({ error: 'KEY_UPDATE_UNAVAILABLE' });
+    const stillOn = await env.DB.prepare('SELECT enabled FROM provider_keys WHERE id = ?').bind(id).first<{ enabled: number }>();
+    expect(stillOn?.enabled).toBe(1);
+  });
 });
 
 describe('admin conversations', () => {
@@ -1113,6 +1187,7 @@ describe('admin route table', () => {
       'POST /api/tts-settings/test',
       'POST /api/world-book/import',
       'POST /api/world-book/entry',
+      'PATCH /api/keys/:id',
       'PATCH /api/world-book',
       'PUT /api/body-emoji-guides',
       'PUT /api/emoji-aliases',

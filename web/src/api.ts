@@ -397,6 +397,12 @@ export const api = {
     return request<ProviderKeyItem>('POST', '/api/keys', input);
   },
 
+  // §81：停用只影响路由选择，密钥本身不删；回执与列表同一形状
+  async setKeyEnabled(id: string, enabled: boolean): Promise<ProviderKeyItem> {
+    const item = await request<ProviderKeyItem>('PATCH', '/api/keys/' + encodeURIComponent(id), { enabled });
+    return { ...item, models: Array.isArray(item.models) ? item.models : [] };
+  },
+
   deleteKey(id: string): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>('DELETE', '/api/keys/' + encodeURIComponent(id));
   },

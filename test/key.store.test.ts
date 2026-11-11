@@ -145,3 +145,34 @@ describe('key models 列（§20.2/§20.3）', () => {
     expect((await keys.list()).map((key) => key.id)).toEqual(['key-earliest', 'key-off', 'key-a', 'key-b']);
   });
 });
+
+describe('key 手动启停（§81）', () => {
+  it('setEnabled 停用后 list 仍看得到、listEnabled 不再返回；再启用恢复', async () => {
+    const { keys } = makeRepos();
+    const created = await keys.create({ provider: 'openai-compat', label: '待停用', apiKey: 'sk-toggle-0001' });
+    const setEnabled = keys.setEnabled;
+    if (setEnabled === undefined) throw new Error('D1 仓储应实现 setEnabled');
+
+    const off = await setEnabled.call(keys, created.id, false);
+    expect(off?.enabled).toBe(false);
+    expect(off?.keyHint).toBe(created.keyHint);
+
+    const listed = await keys.list();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.enabled).toBe(false);
+    expect(await keys.listEnabled('openai-compat')).toEqual([]);
+
+    const on = await setEnabled.call(keys, created.id, true);
+    expect(on?.enabled).toBe(true);
+    expect((await keys.listEnabled('openai-compat')).map((key) => key.id)).toEqual([created.id]);
+  });
+
+  it('未知 id 回 null，不凭空造行', async () => {
+    const { keys } = makeRepos();
+    const setEnabled = keys.setEnabled;
+    if (setEnabled === undefined) throw new Error('D1 仓储应实现 setEnabled');
+
+    expect(await setEnabled.call(keys, 'missing-key', false)).toBeNull();
+    expect(await keys.list()).toEqual([]);
+  });
+});

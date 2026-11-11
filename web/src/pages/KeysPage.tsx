@@ -13,6 +13,7 @@ export default function KeysPage() {
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<Record<string, string>>({});
   const [testingId, setTestingId] = useState('');
+  const [togglingId, setTogglingId] = useState('');
 
   useEffect(() => {
     void loadItems();
@@ -60,6 +61,22 @@ export default function KeysPage() {
       setError(describeError(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function toggleEnabled(item: ProviderKeyItem): Promise<void> {
+    if (togglingId !== '') return;
+    setMessage('');
+    setError('');
+    setTogglingId(item.id);
+    try {
+      const updated = await api.setKeyEnabled(item.id, !item.enabled);
+      setItems((current) => current.map((row) => (row.id === updated.id ? updated : row)));
+      setMessage('已' + (updated.enabled ? '启用' : '停用') + '密钥 ' + updated.label);
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setTogglingId('');
     }
   }
 
@@ -159,6 +176,7 @@ export default function KeysPage() {
 
       <aside className="card">
         <h2>已有密钥</h2>
+        <p className="hint">停用只影响路由选择，不会删除密钥；需要时再点「启用」恢复。</p>
         {items.length === 0 ? <p className="hint">还没有密钥。缺少密钥时对话会报 NO_KEY_FOR_PROVIDER。</p> : null}
         <ul className="items keys">
           {items.map((item) => (
@@ -173,10 +191,23 @@ export default function KeysPage() {
               </div>
               <div className="hint">适用模型：{item.models.length === 0 ? '全部' : item.models.join('、')}</div>
               <div className="key-actions">
-                <button type="button" className="ghost small" disabled={testingId === item.id} onClick={() => void test(item)}>
+                <button
+                  type="button"
+                  className={item.enabled ? 'ghost small' : 'primary small'}
+                  disabled={togglingId === item.id}
+                  onClick={() => void toggleEnabled(item)}
+                >
+                  {togglingId === item.id ? '处理中…' : item.enabled ? '停用' : '启用'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost small"
+                  disabled={testingId === item.id || togglingId === item.id}
+                  onClick={() => void test(item)}
+                >
                   {testingId === item.id ? '测试中…' : '测试连通性'}
                 </button>
-                <button type="button" className="danger small" onClick={() => void remove(item)}>
+                <button type="button" className="danger small" disabled={togglingId === item.id} onClick={() => void remove(item)}>
                   删除
                 </button>
               </div>
