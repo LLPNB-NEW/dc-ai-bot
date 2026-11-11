@@ -5845,6 +5845,7 @@ CREATE TABLE IF NOT EXISTS image_settings (
 - `npx tsc --noEmit -p tsconfig.json` 0；全量 `npx vitest run` 98 文件 1828 例全过；`npm run test:node` 9 文件 122 passed + 1 skipped；`npm run typecheck:web` 0；`npm run build:web` 成功。
 - 新增测试：`test/image-settings.store.test.ts` 7 例、`test/image-settings.api.test.ts` 12 例、`web/src/api.image.test.ts` 9 例；迁移测试把 0036 的 7 列、主键、默认空串、CHECK 与 upsert 都覆盖了。
 - 后台视觉证据（1280×800 深色，同一场景，Before 用 `e0e149b` 的旧构建、After 用新构建）：`_dcai_preview/shots/image-settings/01-before-reply-page.png`（旧页没有生图卡）、`02-after-image-card.png`、`03-after-save-model.png`、`04-after-clear-key.png`、`05-after-remove-layer.png`。请求日志证明「留空不送 apiKey」「清除送空串」「删除后重新 GET」。
+- 部署到 203.0.113.10 的 `/opt/dc-ai-bot`（源码备份 `/opt/backup-src-20261111-144955.tar.gz`）：启动日志 `迁移已执行：0036_image_settings.sql`、`applied=1 skipped=35`、`build=image-settings-1`、`gateway READY as 小神鲸`；容器内 `/api/health` 200；未登录 `GET/PUT/DELETE /api/image-settings` 全回 401 `UNAUTHORIZED`（路由存在，被鉴权挡住）；线上 `image_settings` 表已建好、当前 0 行。
 
 ### 82.7 回滚
 
