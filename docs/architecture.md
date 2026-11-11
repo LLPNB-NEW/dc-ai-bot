@@ -432,6 +432,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages (guild_id, channel_i
 | GET | `/api/vision-settings` | — | 200 `{items:[{scope,scopeId,enabled,updatedAt}],default:true}`（`default` 恒为 `true`：三层都没配就是开；只列原始行、不合并，§41.3） |
 | PUT | `/api/vision-settings` | `{scope,scopeId?,enabled}` | 200 回写后的那一行；400 `{error:'BAD_SCOPE'}`（scope 不是 global/guild/channel）/ 400 `{error:'BAD_REQUEST'}`（guild / channel 层的 `scopeId` 缺失或为空）/ 400 `{error:'BAD_ENABLED'}`（`enabled` 不是布尔，§41.3） |
 | DELETE | `/api/vision-settings` | `{scope,scopeId?}` | 200 `{ok:true}`；只删这一层那一行、不级联（删掉就回落到上一层，§41.1） |
+| GET | `/api/image-settings` | — | 200 `{items:[{scope,scopeId,model,baseUrl,keyHint,updatedAt}],defaultModel,limits:{model,baseUrl}}`（`items` 只列原始行、不合并；`defaultModel` 是 `gemini-nano-banana-2.1`，长度上限由后端给，§82.1、§82.4） |
+| PUT | `/api/image-settings` | `{scope,scopeId?,model?,baseUrl?,apiKey?}` | 200 回写后的那一行；`model` / `baseUrl` 省略或空串 = 这一项沿用上层；`apiKey` 省略 = 保留本层密文、空串 = 清除；400 `BAD_SCOPE` / `BAD_REQUEST` / `{error:'BAD_IMAGE_SETTINGS',detail}`；501 `IMAGE_SETTINGS_UNAVAILABLE`（§82.4） |
+| DELETE | `/api/image-settings` | `{scope,scopeId?}` | 200 `{ok:true}`；只删这一层那一行、不级联（删掉就回落到上一层，§82.4） |
 | GET | `/api/voice-settings` | — | 200 `{items:[{scope,scopeId,mode,voice,speed,updatedAt}],default:{mode:0,voice:'',speed:100},modes:[0,1,2],speedMin:50,speedMax:200}`（`items` 只列原始行、不合并；`default` 是三层都没配时的取值，`modes` / `speedMin` / `speedMax` 决定页面画哪些选项——前端不抄常量，§44.1、§44.4） |
 | PUT | `/api/voice-settings` | `{scope,scopeId?,mode,voice?,speed?}` | 200 回写后的那一行；400 `{error:'BAD_SCOPE'}`（scope 不是 global/guild/channel）/ 400 `{error:'BAD_REQUEST'}`（guild / channel 层的 `scopeId` 缺失或为空）/ 400 `{error:'BAD_VOICE_MODE'}`（`mode` 不是 0..2 的整数）/ 400 `{error:'BAD_VOICE_SPEED'}`（`speed` 不是 50..200 的整数，§44.1） |
 | DELETE | `/api/voice-settings` | `{scope,scopeId?}` | 200 `{ok:true}`；只删这一层那一行、不级联（删掉就回落到上一层，§44.1） |
@@ -5319,13 +5322,13 @@ export interface ToolCallDelta {
 - **工具门控照抄 `story_reply`**：`drawToolsFor(preset)`（`src/core/chat/image-tool.ts:43`）只在 `preset.indexOf('draw_image') !== -1` 时返回工具；预设没写的频道，请求体里连这条工具都不存在，形状与加这层之前逐字相同。
 - **只在上下文工具模式装配**：`src/core/chat/service.ts:1288` `const drawTools = contextToolMode ? drawToolsFor(promptParts.before + '\n' + promptParts.after) : [];`，同时进普通 `tools`（`:1289`）与 `contextToolFields`（`:1346-1347` 的 `tools: [...buildContextTools(contextBody), ...drawTools]`、`toolChoice: 'auto'`）。
 - **命中就把正文换成台词**：`:1475` `drawPrompt = drawPromptOf(first.calls);`，非 `null` 时再取 `drawLineOf(first.calls)`（`say`，`src/core/chat/image-tool.ts:76`）；取了就用它当正文，没取到才保留模型自己写的正文（`draw-image-3` 之前是直接 `raw = ''`、只发图）。同时让 §59 的「空回补交付」不再问一次（`:1480` 的条件带 `drawPrompt === null`）——工具已经交付了这一轮，再问一次只会多花一次调用。
-- **生图用当前这把 Key 的 baseUrl**：`requestImage()`（`src/core/chat/image-tool.ts:86`）→ `POST {baseUrl}/images/generations`，body 固定 `{model:'gemini-3.1-flash-image', prompt, n:1, response_format:'b64_json'}`，超时 `AbortSignal.timeout(IMAGE_TIMEOUT_MS=180_000)`（`:21`）。认 `data[0].b64_json`，也认 `data[0].url` 的 `data:` 形式；三种失败各有错误码：`IMAGE_HTTP`（`:107`，带状态与 200 字原文）、`IMAGE_BAD_JSON`（`:112`）、`IMAGE_MISSING`（`:121`，上游 2xx 但没图）。
+- **生图默认用当前这把 Key 的 baseUrl**：`requestImage()`（`src/core/chat/image-tool.ts:85`）→ `POST {baseUrl}/images/generations`，body 里的 `model` 缺省是 `IMAGE_MODEL_NAME`（现为 `gemini-nano-banana-2.1`），也可由后台三层配置逐层覆盖（§82）；其余固定 `{prompt, n:1, response_format:'b64_json'}`，超时 `AbortSignal.timeout(IMAGE_TIMEOUT_MS=180_000)`（`:21`）。认 `data[0].b64_json`，也认 `data[0].url` 的 `data:` 形式；三种失败各有错误码：`IMAGE_HTTP`（`:107`，带状态与 200 字原文）、`IMAGE_BAD_JSON`（`:112`）、`IMAGE_MISSING`（`:121`，上游 2xx 但没图）。
 - **发图与文字分两步**：`src/workers/gateway/engine.ts:744` 取 `result.image`；`:747` 只发图那轮正文留空串，不再补「（模型没有返回内容）」；`:759` `imageOnly = image !== undefined && text.trim() === ''`；`:761-769` 调 `channel.sendFile` 发附件，文件名按 mime 取 `image.png` / `image.webp` / `image.jpg`（Discord 靠后缀预览）；`:776` 只有「图没发出去且没正文」才补一句「（图片没发出去）」；`:778` `if (!imageOnly || !imageSent)` 才建那条文字消息。
 - **空回判据放行图片**：`:1546` `if (raw.trim() === '' && imageResult === undefined)` 才算空回；生成失败不吞（`:1541` `图片生成失败 key=…`），宁可这轮按空回重试，也不放一张空白图出去。
 
 ### 69.3 代码地图
 
-- 新文件 `src/core/chat/image-tool.ts`：`DRAW_TOOL_NAME='draw_image'`（`:9`）、`IMAGE_MODEL_NAME='gemini-3.1-flash-image'`（`:15`）、`IMAGE_PROMPT_MAX_CHARS=8000`（`:18`）、`drawTool()`（`:25`，必填 `prompt` 与 `say`）、`drawToolsFor()`（`:43`）、`drawPromptOf()`（`:48`，没调/参数坏/空串都返回 `null`，超长截断）、`drawLineOf()`（`:76`，同上，台词上限 `DRAW_LINE_MAX_CHARS=600`）、`requestImage()`（`:86`）。
+- 新文件 `src/core/chat/image-tool.ts`：`DRAW_TOOL_NAME='draw_image'`（`:9`）、`IMAGE_MODEL_NAME='gemini-nano-banana-2.1'`（`:16`）、`IMAGE_PROMPT_MAX_CHARS=8000`（`:18`）、`drawTool()`（`:25`，必填 `prompt` 与 `say`）、`drawToolsFor()`（`:43`）、`drawPromptOf()`（`:48`，没调/参数坏/空串都返回 `null`，超长截断）、`drawLineOf()`（`:76`，同上，台词上限 `DRAW_LINE_MAX_CHARS=600`）、`requestImage()`（`:86`）。
 - 服务层 `src/core/chat/service.ts`：`:1471-1476` 分流、`:1521-1542` 调 `requestImage` 并打 `图片回复 model=… key=… prompt=<字数> bytes=… ms=…` 或 `图片生成失败`、`:1546` 空回、`:1634` `result.image`、`:1650` 落库 `[图片]`、`:1670` 成功日志尾部的 `image=1`、`:1681` 没有正文就不问表情模型。
 - 发送侧：`src/workers/gateway/engine.ts:734` `TurnResult.image`、`:757-777` 附件发送、`:772` `发送图片失败：`；`src/workers/gateway/channel-rest.ts:32` 的 `sendFile?(channelId, bytes, file?)` 与 `:80` 的实现；`src/workers/discord/rest.ts:120` `ChannelFileShape`、`:131` `sendChannelFile(…, shape?)`。
 - 门牌：`GATEWAY_BUILD = 'draw-image-2'`（`src/workers/gateway/engine.ts:131`，`test/gateway.node.test.ts:229` 同步）。
@@ -5349,7 +5352,7 @@ export interface ToolCallDelta {
 ### 69.6 边界
 
 - 只在上下文工具模式发这个工具；普通模式的工具调用不解析，预设里写 `draw_image` 也不会画。
-- 生图模型名写死在 `IMAGE_MODEL_NAME`；换供应商要么改常量，要么在那一侧做模型别名（中继默认就是 `gemini-3.1-flash-image`）。
+- 生图模型名有兜底常量 `IMAGE_MODEL_NAME`，但后台三层可以逐层覆盖（§82）；换供应商优先在后台改，改不到再动常量或在供应商侧做模型别名。
 - 失败按空回重试：`MAX_ATTEMPTS` 之内每次都会真的再生成一张图（时间与额度都花掉）；它只保证「不发空白图」，不保证这轮一定有图。
 - `n` 固定 1；Discord 附件上限 10 MB，线上实测 0.7–0.8 MB；prompt 超过 8000 字截断后续画，不判整轮失败。
 - 图片不参与下一轮的多模态理解：历史里只有 `[图片]` 占位，模型记得自己画过，但看不到那张图。
@@ -5774,3 +5777,77 @@ judge 一直被教成写 MiMo 的形状：开头 `(怅然)` 的风格组 + 正�
 - 无新迁移、无数据形状变化，回滚只是代码：前端退回 `worldbook-rename-1` 的构建，`GATEWAY_BUILD` 与镜像退回 `worldbook-rename-1`（`src/workers/gateway/engine.ts:133`）。
 - 已经停用的 Key 不会因为回滚自动恢复；需要时用 `UPDATE provider_keys SET enabled = 1 WHERE id = '<id>';`，或在新版后台点「启用」。
 - 回滚后旧前端仍然读 `GET /api/keys` 的 `enabled` 字段，只是不再有启停按钮。
+## 82. 生图模型与三层自定义（image-settings-1，2026-11-11）
+
+默认生图模型从 `gemini-3.1-flash-image` 换成 `gemini-nano-banana-2.1`，同时把「用哪个模型、打哪个地址、用哪把 Key」搬进后台「回复」页。三层作用域仍是 `channel > guild > global`，但这一版是**字段级继承**：每一层只覆盖自己填了的项，没填的继续往上层找，整条链都空才落回默认模型与当前聊天 Key。
+
+### 82.1 口径与决定
+
+- 默认模型：`src/core/chat/image-tool.ts:16` 的 `IMAGE_MODEL_NAME = 'gemini-nano-banana-2.1'`；`requestImage` 仍按 `options.model ?? IMAGE_MODEL_NAME` 取模型（`:97`）。
+- 自定义三个字段：`model`、`baseUrl`、`apiKey`。三者各自独立继承，不要求整行一起配：例如频道层只填模型，地址与 Key 仍可用全局层或当前聊天 Key。
+- 空串 = 这一项交给上层；三项都空且这一层本来没有行 = 没有可存的东西，后台禁用保存。`apiKey` 另有第三种状态：请求体里**省略** `apiKey` = 保留本层已存的密文；显式送 `''` = 清掉本层 Key。
+- 只有真要画图时才读配置（`src/core/chat/service.ts:1618` 之后）。普通聊天、表情、识图都不会因为生图配置读失败而受影响；单层读取抛错只跳过该层。
+- 后台「当前生效值」一栏用的是已保存的行，不把输入框里还没保存的草稿算进去；`global` / `guild` 两层看到的就是下一轮真正会用的值，`channel` 层因为后台不知道它属于哪个服务器，只看 `channel → global`，见 §82.5。
+
+### 82.2 数据与仓储
+
+迁移 `migrations/0036_image_settings.sql` 新建：
+
+```sql
+CREATE TABLE IF NOT EXISTS image_settings (
+  scope TEXT NOT NULL CHECK (scope IN ('global','guild','channel')),
+  scope_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  base_url TEXT NOT NULL DEFAULT '',
+  key_sealed TEXT NOT NULL DEFAULT '',
+  key_hint TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (scope, scope_id)
+);
+```
+
+- `ImageSettingsStore`（`src/core/ports.ts:301`）：`get` 只给运行时并返回解密后的 `apiKey`；`list` 只给后台，永远不含明文；`put` 负责「省略保留、空串清除」；`remove` 删这一层。
+- D1 实现（`src/workers/db/d1-repository.ts:1546`）：`key_sealed` 用与供应商 Key 同一套 `secretBox` 加密，`key_hint` 走 `maskKeyHint`；列表行由 `toImageSettingsView`（`:323`）白名单化，密文与明文都不出库。
+- `createRepositories` 返回对象加 `imageSettings`（`:2187`）；`src/node/main.ts:230` 与 `src/workers/index.ts:283` 把它交给 `createAdminApp`，聊天服务靠 `...data` 自动拿到。
+
+### 82.3 运行时解析
+
+`src/core/chat/image-settings.ts`：
+
+- `IMAGE_MODEL_MAX_CHARS = 200`、`IMAGE_BASE_URL_MAX_CHARS = 500`（`:6`、`:9`）。
+- `resolveImageSettings`（`:35`）按 `channel → guild → global` 逐字段取第一个非空值；`model` 整条链都空时用 `IMAGE_MODEL_NAME`，`baseUrl` 与 `apiKey` 都空时返回 `undefined`，让调用方继续用当前聊天 Key 的地址与密钥。
+- `readImageSettings`（`:65`）按 `ctx.guildId` / `ctx.channelId` 逐层 `get`；单层抛错只跳过该层，不影响其它层。
+- `src/core/chat/service.ts:1622` 起：没有 `imageSettings` 端口时用默认模型 + 聊天 Key；有端口时读三层配置，再把 `baseUrl`、`apiKey`、`model` 传给 `requestImage`。自定义 Key 生效时排障日志的 `key=` 写 `custom`，避免把聊天 Key 的名字误报成生图 Key。
+
+### 82.4 接口与后台
+
+管理 API（`src/workers/http/app.ts:2195` 起；helper `readImageSettingsFields` 在 `:586`）：
+
+| 方法 | 路径 | 请求 | 响应 |
+|---|---|---|---|
+| GET | `/api/image-settings` | — | `{items: ImageSettingsView[], defaultModel, limits:{model:200,baseUrl:500}}`；未接线 501 `IMAGE_SETTINGS_UNAVAILABLE` |
+| PUT | `/api/image-settings` | `{scope,scopeId?,model?,baseUrl?,apiKey?}` | 200 回写后的那一行；400 `BAD_SCOPE` / `BAD_REQUEST` / `{error:'BAD_IMAGE_SETTINGS',detail}`；未接线 501 |
+| DELETE | `/api/image-settings` | `{scope,scopeId?}` | 200 `{ok:true}`；400 同上；未接线 501 |
+
+- `model` 与 `baseUrl` 都先 trim 再判长度；`model: null` / 省略按空串处理（= 沿用上层），非字符串回 `BAD_IMAGE_SETTINGS`。`apiKey` 省略或 `null` 表示保留，空串表示清除，非字符串回 `BAD_IMAGE_SETTINGS`。
+- `scopeId` 的规则与其它三层设置一致：`global` 省略或空串；`guild` / `channel` 必须给非空字符串。
+- 后台在「回复」页（`web/src/pages/ReplyPage.tsx:675` 起）新增一张卡：三层下拉、三个输入、当前生效值三行（标出来自哪一层）、保存 / 清除本层 Key / 清除这一层。保存成功只就地替换当前层的行，不整份重拉；失败只写表单错误，不清输入。前端 API 在 `web/src/api.ts:1947` 起。
+
+### 82.5 限制与已知偏差
+
+- 后台只输入频道 ID，拿不到它所属的服务器，所以选中「频道」时「当前生效值」只按 `频道 → 全局 → 默认` 计算，**不含 guild 层**；页面已明写这一点，并提示要看含服务器的继承请直接选「服务器」层。实际运行时仍是 `channel → guild → global`，不受这个预览限制影响。
+- 生图默认模型写在中继的上游模型名里；如果中继不认 `gemini-nano-banana-2.1`，后台可以逐层改成中继认的名字，不用改代码。
+- 自定义 `baseUrl` 必须真的支持 `POST /images/generations`；地址填错只会在画图时回 `IMAGE_HTTP`，不影响文字聊天。
+- 这一版没有「试画一张」按钮；验收靠真实请求或中继探针。
+
+### 82.6 门槛与验证
+
+- `npx tsc --noEmit -p tsconfig.json` 0；全量 `npx vitest run` 98 文件 1828 例全过；`npm run test:node` 9 文件 122 passed + 1 skipped；`npm run typecheck:web` 0；`npm run build:web` 成功。
+- 新增测试：`test/image-settings.store.test.ts` 7 例、`test/image-settings.api.test.ts` 12 例、`web/src/api.image.test.ts` 9 例；迁移测试把 0036 的 7 列、主键、默认空串、CHECK 与 upsert 都覆盖了。
+- 后台视觉证据（1280×800 深色，同一场景，Before 用 `e0e149b` 的旧构建、After 用新构建）：`_dcai_preview/shots/image-settings/01-before-reply-page.png`（旧页没有生图卡）、`02-after-image-card.png`、`03-after-save-model.png`、`04-after-clear-key.png`、`05-after-remove-layer.png`。请求日志证明「留空不送 apiKey」「清除送空串」「删除后重新 GET」。
+
+### 82.7 回滚
+
+- 代码回滚：前端退回 `key-toggle-1` 的构建，`GATEWAY_BUILD` 退回 `key-toggle-1`，`IMAGE_MODEL_NAME` 改回旧值即可；旧前端不会调用 `/api/image-settings`。
+- 数据回滚：`0036_image_settings.sql` 已经执行时，旧代码完全忽略这张表；要彻底清掉可 `DROP TABLE image_settings;`，不影响其它表。
+- 已经写入的自定义 Key 不会因为回滚泄露到日志或列表；列表接口从来只回 `keyHint`。

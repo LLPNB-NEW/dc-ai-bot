@@ -1942,6 +1942,115 @@ export function describeVisionSettingsError(error: unknown): string {
   return describeError(error);
 }
 
+// 门牌 image-settings-1 生图自定义：三层配置（channel > guild > global），
+// model / baseUrl / apiKey 各自按层取第一个非空值，不是整行覆盖。
+export interface ImageSettingsRow {
+  scope: Scope;
+  scopeId: string;
+  model: string;
+  baseUrl: string;
+  keyHint: string;
+  updatedAt: string;
+}
+
+/** GET /api/image-settings：items 只含已配置的层，全空时才落回 defaultModel 与当前聊天 Key。 */
+export interface ImageSettingsSnapshot {
+  items: ImageSettingsRow[];
+  defaultModel: string;
+  // 上限由后端给，页面只拿来限制输入长度，不在前端另写一份常量。
+  limits: { model: number; baseUrl: number };
+}
+
+function toImageSettingsRow(raw: unknown): ImageSettingsRow | null {
+  const source = toRecord(raw);
+  const scope = toScope(source.scope);
+  if (scope === null) return null;
+  return {
+    scope,
+    scopeId: normalizeScopeId(scope, typeof source.scopeId === 'string' ? source.scopeId : ''),
+    model: typeof source.model === 'string' ? source.model : '',
+    baseUrl: typeof source.baseUrl === 'string' ? source.baseUrl : '',
+    keyHint: typeof source.keyHint === 'string' ? source.keyHint : '',
+    updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : '',
+  };
+}
+
+/** GET /api/image-settings；坏形状按「空列表 + 无默认模型」兜底，页面照常渲染。 */
+export async function fetchImageSettings(): Promise<ImageSettingsSnapshot> {
+  const raw = await request<unknown>('GET', '/api/image-settings');
+  const source = toRecord(raw);
+  const items: ImageSettingsRow[] = [];
+  if (Array.isArray(source.items)) {
+    for (const entry of source.items) {
+      const row = toImageSettingsRow(entry);
+      if (row !== null) items.push(row);
+    }
+  }
+  const limits = toRecord(source.limits);
+  return {
+    items,
+    defaultModel: typeof source.defaultModel === 'string' ? source.defaultModel : '',
+    limits: {
+      model: toFiniteNumber(limits.model) ?? 0,
+      baseUrl: toFiniteNumber(limits.baseUrl) ?? 0,
+    },
+  };
+}
+
+// global 的定位键只有 scope 本身：契约这一层不带 scopeId，多送一个空串可能被判成坏 body。
+function imageSettingsKey(scope: Scope, scopeId?: string): { scope: Scope; scopeId?: string } {
+  const normalized = normalizeScopeId(scope, typeof scopeId === 'string' ? scopeId : '');
+  return normalized === '' ? { scope } : { scope, scopeId: normalized };
+}
+
+/** PUT /api/image-settings：写选中这一层，回保存后的这一行。 */
+export async function saveImageSetting(input: {
+  scope: Scope;
+  scopeId?: string;
+  model: string;
+  baseUrl: string;
+  /** 省略 = 保留本层已存密文；空串 = 清除本层 Key（回到上层 / 当前聊天 Key）。 */
+  apiKey?: string;
+}): Promise<ImageSettingsRow> {
+  const key = imageSettingsKey(input.scope, input.scopeId);
+  const raw = await request<unknown>('PUT', '/api/image-settings', {
+    ...key,
+    model: input.model,
+    baseUrl: input.baseUrl,
+    // 只有调用方明确给了 apiKey 才发：省略才是「保留原密文」。
+    ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
+  });
+  return (
+    toImageSettingsRow(raw) ?? {
+      scope: key.scope,
+      scopeId: normalizeScopeId(key.scope, input.scopeId ?? ''),
+      model: input.model.trim(),
+      baseUrl: input.baseUrl.trim(),
+      keyHint: '',
+      updatedAt: '',
+    }
+  );
+}
+
+/** DELETE /api/image-settings：删掉这一层 = 恢复上层，本来没配也回 200。 */
+export async function clearImageSetting(input: { scope: Scope; scopeId?: string }): Promise<void> {
+  await request<{ ok?: boolean }>('DELETE', '/api/image-settings', imageSettingsKey(input.scope, input.scopeId));
+}
+
+// BAD_IMAGE_SETTINGS 带 detail（模型 / 地址哪一项不合法），直接显示它比抛错误码有用。
+export function describeImageSettingsError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.code === 'IMAGE_SETTINGS_UNAVAILABLE') return '生图配置存储未启用（缺 D1 绑定），这一页暂时存不了';
+    if (error.code === 'BAD_SCOPE') return '作用域不合法：只能是全局 / 服务器 / 频道';
+    if (error.code === 'BAD_REQUEST') return '请求体不合法：可能缺了 scope / scopeId，或字段类型不对';
+    if (error.code === 'BAD_IMAGE_SETTINGS') {
+      const detail = typeof error.payload.detail === 'string' ? error.payload.detail.trim() : '';
+      return detail === '' ? '生图配置不合法：请检查模型名与地址' : detail;
+    }
+  }
+  return describeError(error);
+}
+
 // 门牌 pg-errors-1 故障页：PG 中继最近 200 条报错的只读快照。
 // at / status / code / message 是每行的定位信息；model / key / durationMs / requestId 中继不一定给。
 export interface PgErrorEntry {

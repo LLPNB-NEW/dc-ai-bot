@@ -279,6 +279,8 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext, path
     replySettings: data.replySettings,
     // §41：主模型识图的三层开关表（global / guild / channel，缺省开）
     visionSettings: data.visionSettings,
+    // 生图自定义：三层各一行，空字段逐项继承；Key 只存密文与掩码
+    imageSettings: data.imageSettings,
     // §voice：语音回复的三层配置表（0 关 / 1 按指令 / 2 总是）
     voiceSettings: data.voiceSettings,
     // 超时配置的后台覆盖值：每次请求前重读一次，后台保存后本 isolate 立刻跟上
@@ -289,7 +291,7 @@ async function handleApi(request: Request, env: Env, ctx: ExecutionContext, path
     ttsStyles: data.ttsStyles,
     // 深度注入：三层各一行，聊天装配按 channel > guild > global 取第一个非空
     promptInjections: data.promptInjections,
-    // 世界书：三层各一本整本覆盖，聊天装配按 channel > guild > global 取第一本
+    // 世界书：每层可存多本，聊天装配按 channel > guild > global 取第一个有启用条目的层
     worldBooks: data.worldBooks,
     ttsEnvPresent: legacyTtsEnvPresent(env),
     // §23.1/§23.6：认图读写的落库表，以及那棵「后台认图」按钮背后的执行器

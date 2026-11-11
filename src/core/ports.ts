@@ -12,6 +12,9 @@ import type {
   EmojiAlias,
   EmojiDescription,
   DecryptedKey,
+  ImageSettingsInput,
+  ImageSettingsSecret,
+  ImageSettingsView,
   PromptConfig,
   PromptDefaultEntry,
   PromptDefaultKey,
@@ -286,6 +289,21 @@ export interface VisionSettingsStore {
   list(): Promise<VisionSettingsConfig[]>;
   /** 覆盖写；updatedAt 由仓储补写入时刻，调用方不用传 */
   put(cfg: Omit<VisionSettingsConfig, 'updatedAt'>): Promise<VisionSettingsConfig>;
+  /** 恢复上层（删行）；不存在时静默成功 */
+  remove(key: ScopedKey): Promise<void>;
+}
+
+/**
+ * 生图自定义的三层配置：global / guild / channel 各至多一行。
+ * get 回解密后的 apiKey（只给运行时），list 只回掩码 keyHint（给后台）。
+ * 空字段 = 这一项没配，由 core 按 channel > guild > global 逐字段继承，最后落到默认模型与当前聊天 Key。
+ */
+export interface ImageSettingsStore {
+  get(key: ScopedKey): Promise<ImageSettingsSecret | null>;
+  /** 全表，后台列表用；不含明文 */
+  list(): Promise<ImageSettingsView[]>;
+  /** 覆盖写；apiKey 省略 = 保留原密文，空串 = 清掉本层 Key */
+  put(input: ImageSettingsInput): Promise<ImageSettingsView>;
   /** 恢复上层（删行）；不存在时静默成功 */
   remove(key: ScopedKey): Promise<void>;
 }

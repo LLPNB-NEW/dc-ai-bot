@@ -45,6 +45,7 @@ const EXPECTED_FILES = [
   '0033_timeout_settings.sql',
   '0034_world_book_state.sql',
   '0035_world_books_multi.sql',
+  '0036_image_settings.sql',
 ];
 
 const ROOT = mkdtempSync(join(tmpdir(), 'dc-ai-bot-migrate-'));
@@ -65,7 +66,7 @@ afterAll(() => {
 });
 
 describe('runMigrations', () => {
-  it('35 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
+  it('36 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
     const filePath = newDbPath();
     const first = await runMigrations(filePath, MIGRATIONS_DIR);
     expect(first.applied).toEqual(EXPECTED_FILES);
@@ -401,6 +402,79 @@ describe('runMigrations', () => {
       db
         .prepare('INSERT INTO world_book_state (guild_id, channel_id, book_id, entry_id, updated_at) VALUES (?, ?, ?, ?, ?)')
         .bind('g1', 'c1', 'guild:g1', 1, '2026-01-01T00:00:07.000Z')
+        .run(),
+    ).rejects.toThrow();
+  });
+
+  it('0036 建出 image_settings：7 列、主键 (scope, scope_id) 可 upsert、四列默认空串、坏 scope 被拒', async () => {
+    const filePath = newDbPath();
+    await runMigrations(filePath, MIGRATIONS_DIR);
+    const db = createSqliteDatabase(filePath);
+
+    const columns = await db
+      .prepare('PRAGMA table_info(image_settings)')
+      .all<{ name: string; type: string; notnull: number; pk: number; dflt_value: string | null }>();
+    expect(columns.results.map((column) => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['scope', 'TEXT', 1, 1],
+      ['scope_id', 'TEXT', 1, 2],
+      ['model', 'TEXT', 1, 0],
+      ['base_url', 'TEXT', 1, 0],
+      ['key_sealed', 'TEXT', 1, 0],
+      ['key_hint', 'TEXT', 1, 0],
+      ['updated_at', 'TEXT', 1, 0],
+    ]);
+    // 只有 updated_at 必填：其余四个业务列省略时取空串 = 这一项沿用上层（默认值不由迁移写死）
+    expect(columns.results.map((column) => column.dflt_value)).toEqual([null, "''", "''", "''", "''", "''", null]);
+
+    await db
+      .prepare('INSERT INTO image_settings (scope, scope_id, model, base_url, key_sealed, key_hint, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind('global', '', 'gemini-custom', 'https://img.example.com/v1', 'sealed', '…0001', '2026-01-01T00:00:00.000Z')
+      .run();
+    // 只给主键与 updated_at：四个业务列走 DEFAULT ''
+    await db
+      .prepare('INSERT INTO image_settings (scope, scope_id, updated_at) VALUES (?, ?, ?)')
+      .bind('guild', 'g1', '2026-01-01T00:00:01.000Z')
+      .run();
+    const rows = await db
+      .prepare('SELECT scope, scope_id, model, base_url, key_sealed, key_hint, updated_at FROM image_settings ORDER BY scope ASC, scope_id ASC')
+      .all();
+    expect(rows.results).toEqual([
+      { scope: 'global', scope_id: '', model: 'gemini-custom', base_url: 'https://img.example.com/v1', key_sealed: 'sealed', key_hint: '…0001', updated_at: '2026-01-01T00:00:00.000Z' },
+      { scope: 'guild', scope_id: 'g1', model: '', base_url: '', key_sealed: '', key_hint: '', updated_at: '2026-01-01T00:00:01.000Z' },
+    ]);
+
+    // 主键是 (scope, scope_id)：同层硬插第二行必须失败，仓储走的 ON CONFLICT 才是覆盖
+    await expect(
+      db
+        .prepare('INSERT INTO image_settings (scope, scope_id, updated_at) VALUES (?, ?, ?)')
+        .bind('guild', 'g1', '2026-01-01T00:00:02.000Z')
+        .run(),
+    ).rejects.toThrow();
+    await db
+      .prepare(
+        `INSERT INTO image_settings (scope, scope_id, model, base_url, key_sealed, key_hint, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (scope, scope_id) DO UPDATE SET
+           model = excluded.model,
+           base_url = excluded.base_url,
+           key_sealed = excluded.key_sealed,
+           key_hint = excluded.key_hint,
+           updated_at = excluded.updated_at`,
+      )
+      .bind('guild', 'g1', 'next-model', '', '', '', '2026-01-01T00:00:02.000Z')
+      .run();
+    const upserted = await db
+      .prepare('SELECT model, updated_at FROM image_settings WHERE scope = ? AND scope_id = ?')
+      .bind('guild', 'g1')
+      .first<{ model: string; updated_at: string }>();
+    expect(upserted).toEqual({ model: 'next-model', updated_at: '2026-01-01T00:00:02.000Z' });
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM image_settings').first<{ n: number }>()).toEqual({ n: 2 });
+
+    // CHECK 是最后一道闸：脏 scope 必须写不进去，不能落库后让读侧去猜
+    await expect(
+      db
+        .prepare('INSERT INTO image_settings (scope, scope_id, updated_at) VALUES (?, ?, ?)')
+        .bind('team', '', '2026-01-01T00:00:03.000Z')
         .run(),
     ).rejects.toThrow();
   });

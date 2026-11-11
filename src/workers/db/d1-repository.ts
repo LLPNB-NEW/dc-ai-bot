@@ -5,6 +5,7 @@ import type {
   ConversationStore,
   EmojiAliasStore,
   EmojiDescriptionStore,
+  ImageSettingsStore,
   KeyRepository,
   PromptDefaultsStore,
   PromptRepository,
@@ -43,6 +44,9 @@ import type {
   DecryptedKey,
   EmojiAlias,
   EmojiDescription,
+  ImageSettingsInput,
+  ImageSettingsSecret,
+  ImageSettingsView,
   ModelRef,
   PromptConfig,
   PromptDefaultEntry,
@@ -303,6 +307,29 @@ function toVisionSettingsConfig(row: VisionSettingsRow): VisionSettingsConfig | 
   if (row.scope !== 'global' && row.scope !== 'guild' && row.scope !== 'channel') return null;
   if (row.enabled !== 0 && row.enabled !== 1) return null;
   return { scope: row.scope, scopeId: row.scope_id, enabled: row.enabled === 1, updatedAt: row.updated_at };
+}
+
+interface ImageSettingsRow {
+  scope: string;
+  scope_id: string;
+  model: string;
+  base_url: string;
+  key_sealed: string;
+  key_hint: string;
+  updated_at: string;
+}
+
+/** 行 -> 后台形状：scope 只认三个枚举；key 只带掩码，密文与明文都不出仓储 */
+function toImageSettingsView(row: ImageSettingsRow): ImageSettingsView | null {
+  if (row.scope !== 'global' && row.scope !== 'guild' && row.scope !== 'channel') return null;
+  return {
+    scope: row.scope,
+    scopeId: row.scope_id,
+    model: row.model,
+    baseUrl: row.base_url,
+    keyHint: row.key_hint,
+    updatedAt: row.updated_at,
+  };
 }
 
 interface VoiceSettingsRow {
@@ -727,6 +754,7 @@ export function createRepositories(
   replySettings: ReplySettingsStore;
   bodyEmojiGuides: BodyEmojiGuideStore;
   visionSettings: VisionSettingsStore;
+  imageSettings: ImageSettingsStore;
   voiceSettings: VoiceSettingsStore;
   emojiDescriptions: EmojiDescriptionStore;
   emojiAliases: EmojiAliasStore;
@@ -1514,6 +1542,78 @@ export function createRepositories(
     },
   };
 
+
+  const imageSettings: ImageSettingsStore = {
+    async get(key: ScopedKey): Promise<ImageSettingsSecret | null> {
+      // 只查这一层；空字段由 core 逐字段继承，仓储不猜上层
+      const row = await db
+        .prepare(
+          'SELECT scope, scope_id, model, base_url, key_sealed, key_hint, updated_at FROM image_settings WHERE scope = ? AND scope_id = ?',
+        )
+        .bind(key.scope, key.scopeId)
+        .first<ImageSettingsRow>();
+      const view = row === null ? null : toImageSettingsView(row);
+      if (view === null || row === null) return null;
+      // key_sealed 为空 = 本层没配 Key；有密文才需要解密
+      const apiKey = row.key_sealed === '' ? '' : await secretBox.decrypt(row.key_sealed);
+      return { ...view, apiKey };
+    },
+
+    async list(): Promise<ImageSettingsView[]> {
+      // 后台一次列全表：不碰 key_sealed，明文与掩码都不出这一层
+      const { results } = await db
+        .prepare(
+          'SELECT scope, scope_id, model, base_url, key_sealed, key_hint, updated_at FROM image_settings ORDER BY scope ASC, scope_id ASC',
+        )
+        .all<ImageSettingsRow>();
+      const out: ImageSettingsView[] = [];
+      for (const row of results ?? []) {
+        const view = toImageSettingsView(row);
+        if (view !== null) out.push(view);
+      }
+      return out;
+    },
+
+    async put(input: ImageSettingsInput): Promise<ImageSettingsView> {
+      // apiKey 省略 = 保留旧密文与旧掩码；显式空串 = 清掉本层，读侧落回上层或聊天 Key
+      const previous = await db
+        .prepare('SELECT key_sealed, key_hint FROM image_settings WHERE scope = ? AND scope_id = ?')
+        .bind(input.scope, input.scopeId)
+        .first<{ key_sealed: string; key_hint: string }>();
+      let keySealed = previous?.key_sealed ?? '';
+      let keyHint = previous?.key_hint ?? '';
+      if (input.apiKey !== undefined) {
+        keySealed = input.apiKey === '' ? '' : await secretBox.encrypt(input.apiKey);
+        keyHint = input.apiKey === '' ? '' : maskKeyHint(input.apiKey);
+      }
+      const updatedAt = nowIso();
+      const model = input.model.trim();
+      const baseUrl = input.baseUrl.trim();
+      await db
+        .prepare(
+          `INSERT INTO image_settings (scope, scope_id, model, base_url, key_sealed, key_hint, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (scope, scope_id) DO UPDATE SET
+             model = excluded.model,
+             base_url = excluded.base_url,
+             key_sealed = excluded.key_sealed,
+             key_hint = excluded.key_hint,
+             updated_at = excluded.updated_at`,
+        )
+        .bind(input.scope, input.scopeId, model, baseUrl, keySealed, keyHint, updatedAt)
+        .run();
+      return { scope: input.scope, scopeId: input.scopeId, model, baseUrl, keyHint, updatedAt };
+    },
+
+    async remove(key: ScopedKey): Promise<void> {
+      // 删掉 = 这一层没配置，读侧自然落回上一层；命中 0 行也算成功
+      await db
+        .prepare('DELETE FROM image_settings WHERE scope = ? AND scope_id = ?')
+        .bind(key.scope, key.scopeId)
+        .run();
+    },
+  };
+
   const voiceSettings: VoiceSettingsStore = {
     async get(key: ScopedKey): Promise<VoiceSettingsConfig | null> {
       // 没有行 = 这一层没配置，读侧落回上一层；默认值（mode 0 / 语速 100）由 core 拼，仓储不猜
@@ -2084,6 +2184,7 @@ export function createRepositories(
     replySettings,
     bodyEmojiGuides,
     visionSettings,
+    imageSettings,
     voiceSettings,
     emojiDescriptions,
     emojiAliases,

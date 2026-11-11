@@ -928,6 +928,22 @@ fieldset.fallbacks legend {
   color: var(--muted);
 }
 
+/* 门牌 image-settings-1 生图自定义：生效值撑满中间列，长地址 / Key 掩码允许折行 */
+.page.reply .image-effective-value {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+/* 已配置层的三项摘要同理：宁可折行，也不把时间列挤出卡片 */
+.page.reply .image-row-summary {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* 门牌 pg-errors-1 故障页：六列排得下才用单列整宽，窄屏靠横向滚动，不把原因挤成一列字 */
 .page.errors {
   grid-template-columns: minmax(0, 1fr);

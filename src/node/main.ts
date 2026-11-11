@@ -226,6 +226,8 @@ function createRequestHandlers(db: SqlDatabase, env: NodeEnv, tracker: TaskTrack
     replySettings: data.replySettings,
     // §41：主模型识图的三层开关表（global / guild / channel，缺省开）
     visionSettings: data.visionSettings,
+    // 生图自定义：三层各一行，空字段逐项继承；Key 只存密文与掩码
+    imageSettings: data.imageSettings,
     // §voice：语音回复的三层配置表（0 关 / 1 按指令 / 2 总是）
     voiceSettings: data.voiceSettings,
     // 超时配置的后台覆盖值：启动时读一次，之后每次保存由路由自己装进进程

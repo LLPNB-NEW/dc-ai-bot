@@ -7,6 +7,7 @@ import type {
   ConversationStore,
   EmojiAliasStore,
   EmojiDescriptionStore,
+  ImageSettingsStore,
   KeyRepository,
   LogStore,
   PromptDefaultsStore,
@@ -66,6 +67,7 @@ import type {
   CustomEmoji,
   EmojiAlias,
   EmojiDescribeResult,
+  ImageSettingsInput,
   ModelRef,
   PromptConfig,
   PromptDefaultEntry,
@@ -106,6 +108,8 @@ import {
 } from '../../core/chat/reply-view';
 import { SUMMARY_MAX_CHARS } from '../../core/chat/summary';
 import { DEFAULT_VISION_ENABLED, isVisionEnabled } from '../../core/chat/vision-view';
+import { IMAGE_BASE_URL_MAX_CHARS, IMAGE_MODEL_MAX_CHARS } from '../../core/chat/image-settings';
+import { IMAGE_MODEL_NAME } from '../../core/chat/image-tool';
 import {
   CODE_IDENTITY_TEMPLATE,
   FALLBACK_PROMPT_VARS,
@@ -349,6 +353,8 @@ export interface AdminAppDeps {
   replySettings: ReplySettingsStore;
   /** §41：主模型识图的三层开关；GET 连默认值一起回，后台不用另存一份常量 */
   visionSettings: VisionSettingsStore;
+  /** 生图自定义三层配置；GET 连默认模型与长度上限一起回，未接线时整组端点回 501 */
+  imageSettings?: ImageSettingsStore;
   /** 语音回复的三层配置；GET 连默认值、模式枚举与语速区间一起回，后台不用另存一份常量 */
   voiceSettings: VoiceSettingsStore;
   /** 超时配置的后台覆盖值：一张 name → value 的平表，缺的项由 core 落回 .env 与内置默认 */
@@ -571,6 +577,35 @@ function readScopeKey(body: Record<string, unknown>): ScopedKey | 'BAD_SCOPE' | 
 function readImportScopeKey(body: Record<string, unknown>): ScopedKey | 'BAD_SCOPE' {
   if (body['scope'] === undefined || body['scope'] === null) return { scope: 'global', scopeId: '' };
   return readScopeKey(body) ?? 'BAD_SCOPE';
+}
+
+/**
+ * 生图自定义的 PUT 入参：model / baseUrl 省略或空串 = 这一项沿用上层；
+ * apiKey 省略 = 保留原密文，空串 = 清掉本层 Key。返回字符串表示哪一项不合法（给 detail）。
+ */
+function readImageSettingsFields(
+  body: Record<string, unknown>,
+): { model: string; baseUrl: string; apiKey?: string } | string {
+  const modelRaw = body['model'];
+  if (modelRaw !== undefined && modelRaw !== null && typeof modelRaw !== 'string') return 'model 必须是字符串';
+  const model = typeof modelRaw === 'string' ? modelRaw.trim() : '';
+  if (model.length > IMAGE_MODEL_MAX_CHARS) return 'model 不能超过 ' + String(IMAGE_MODEL_MAX_CHARS) + ' 字';
+
+  const baseUrlRaw = body['baseUrl'];
+  if (baseUrlRaw !== undefined && baseUrlRaw !== null && typeof baseUrlRaw !== 'string') {
+    return 'baseUrl 必须是字符串';
+  }
+  const baseUrl = typeof baseUrlRaw === 'string' ? baseUrlRaw.trim() : '';
+  if (baseUrl.length > IMAGE_BASE_URL_MAX_CHARS) {
+    return 'baseUrl 不能超过 ' + String(IMAGE_BASE_URL_MAX_CHARS) + ' 字';
+  }
+
+  const apiKeyRaw = body['apiKey'];
+  if (apiKeyRaw !== undefined && apiKeyRaw !== null && typeof apiKeyRaw !== 'string') {
+    return 'apiKey 必须是字符串';
+  }
+  const apiKey = typeof apiKeyRaw === 'string' ? apiKeyRaw.trim() : undefined;
+  return apiKey === undefined ? { model, baseUrl } : { model, baseUrl, apiKey };
 }
 
 /** 三层兜底文案的合法 scope；GET 的 scopes 字段与后台下拉共用这一份 */
@@ -2153,6 +2188,50 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
 
     // 删行 = 这一层回到没有配置，读侧自然落回上一层（§41）
     await deps.visionSettings.remove(key);
+    return c.json({ ok: true });
+  });
+
+
+  app.get('/api/image-settings', async (c) => {
+    const store = deps.imageSettings;
+    if (store === undefined) return c.json({ error: 'IMAGE_SETTINGS_UNAVAILABLE' }, 501);
+    // defaultModel 与长度上限一起回：后台不抄常量，改了默认值前端自动跟上
+    const items = await store.list();
+    return c.json({
+      items,
+      defaultModel: IMAGE_MODEL_NAME,
+      limits: { model: IMAGE_MODEL_MAX_CHARS, baseUrl: IMAGE_BASE_URL_MAX_CHARS },
+    });
+  });
+
+  app.put('/api/image-settings', async (c) => {
+    const store = deps.imageSettings;
+    if (store === undefined) return c.json({ error: 'IMAGE_SETTINGS_UNAVAILABLE' }, 501);
+    const body = await readJsonBody(c);
+    if (body === null) return badRequest(c);
+    const key = readScopeKey(body);
+    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
+    if (key === null) return badRequest(c);
+
+    const fields = readImageSettingsFields(body);
+    if (typeof fields === 'string') return c.json({ error: 'BAD_IMAGE_SETTINGS', detail: fields }, 400);
+
+    const input: ImageSettingsInput = { scope: key.scope, scopeId: key.scopeId, ...fields };
+    const saved = await store.put(input);
+    return c.json(saved);
+  });
+
+  app.delete('/api/image-settings', async (c) => {
+    const store = deps.imageSettings;
+    if (store === undefined) return c.json({ error: 'IMAGE_SETTINGS_UNAVAILABLE' }, 501);
+    const body = await readJsonBody(c);
+    if (body === null) return badRequest(c);
+    const key = readScopeKey(body);
+    if (key === 'BAD_SCOPE') return c.json({ error: 'BAD_SCOPE' }, 400);
+    if (key === null) return badRequest(c);
+
+    // 删行 = 这一层回到没有配置，读侧逐字段落回上一层（最后落到默认模型与聊天 Key）
+    await store.remove(key);
     return c.json({ ok: true });
   });
 

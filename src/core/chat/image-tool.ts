@@ -10,10 +10,10 @@ import { resolveTimeout } from '../timeouts';
 export const DRAW_TOOL_NAME = 'draw_image';
 
 /**
- * 生图模型名：与聊天模型无关，只发给 /images/generations。
- * 我们的中继默认就是它；换成别家 OpenAI 兼容服务时改这里（或在那一侧做模型别名）。
+ * 生图默认模型：与聊天模型无关，只发给 /images/generations。
+ * 后台三层配置可以覆盖它；三层都没配时才用这个值。
  */
-export const IMAGE_MODEL_NAME = 'gemini-3.1-flash-image';
+export const IMAGE_MODEL_NAME = 'gemini-nano-banana-2.1';
 
 /** prompt 上限与中继侧一致；超了截断，不因此判整轮失败 */
 export const IMAGE_PROMPT_MAX_CHARS = 8000;

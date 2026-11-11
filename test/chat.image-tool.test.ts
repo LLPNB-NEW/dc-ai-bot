@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DRAW_TOOL_NAME,
+  IMAGE_MODEL_NAME,
   IMAGE_PROMPT_MAX_CHARS,
   drawPromptOf,
   drawToolsFor,
@@ -54,7 +55,8 @@ describe('requestImage', () => {
       });
       expect(calls[0]?.url).toBe('https://relay.test/pg/v1/images/generations');
       const body = JSON.parse(String(calls[0]?.init?.body));
-      expect(body).toMatchObject({ model: 'gemini-3.1-flash-image', prompt: '一只橘猫', n: 1, response_format: 'b64_json' });
+      // 默认模型只认这一个常量；具体值由 image-settings 的 API 测试钉住
+      expect(body).toMatchObject({ model: IMAGE_MODEL_NAME, prompt: '一只橘猫', n: 1, response_format: 'b64_json' });
       expect(image.mime).toBe('image/jpeg');
       expect(Buffer.from(image.data).toString()).toBe('hello');
     } finally {

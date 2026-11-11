@@ -593,6 +593,33 @@ export interface VisionSettingsConfig {
   updatedAt: string;
 }
 
+/**
+ * 生图自定义的一层：model / baseUrl 为空 = 这一项沿用上层或默认值；
+ * keyHint 是 apiKey 的掩码，GET 与列表只回它，明文只出现在 ImageSettingsSecret 里。
+ */
+export interface ImageSettingsView {
+  scope: Scope;
+  scopeId: string;
+  model: string;
+  baseUrl: string;
+  keyHint: string;
+  updatedAt: string;
+}
+
+/** 运行时读出来的这一层：apiKey 是解密后的明文，绝不能进 HTTP 响应 */
+export interface ImageSettingsSecret extends ImageSettingsView {
+  apiKey: string;
+}
+
+/** PUT /api/image-settings 的入参：apiKey 省略 = 保留原密文；空串 = 清掉本层 Key */
+export interface ImageSettingsInput {
+  scope: Scope;
+  scopeId: string;
+  model: string;
+  baseUrl: string;
+  apiKey?: string;
+}
+
 /** 表情选择的独立模型（§21）：enabled=false 表示不问表情模型，只剩主模型自己的 [[react:]] */
 export interface ReactionModelConfig {
   enabled: boolean;

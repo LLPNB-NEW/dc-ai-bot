@@ -2446,7 +2446,7 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 2. **预设里有画图那段**：`sudo sqlite3 /opt/dc-ai-bot/data/dc-ai-bot.sqlite3 "select position,name,enabled from prompt_segments where scope='channel' and scope_id='123456789012345678' and content like '%draw_image%'"` 应返回位置 37 的「画图」段且 `enabled=1`；没有这行就完全不会下发工具。
 3. **请求里带了这条工具**：bot 那一轮的中继日志里，`工具定义按上游协议下发 … names=` 应含 `draw_image`（客户端没声明就该没有——这是门控，不是默认能力）。
 4. **模型真的调了**：同一轮出现 `响应形状 … calls=draw_image(<参数长度>)`；只回文本没调工具，是模型判断这轮不该画，别当成故障。
-5. **生图那行**：bot 日志 `图片回复 model=gemini-3.1-flash-image key=<Key 名> prompt=<字数> bytes=<字节> ms=<毫秒>`；`key=` 必须是 baseUrl 真有 `/images/generations` 的那把（线上是 `pgl` / `pg`，`ds` 一定 404）。
+5. **生图那行**：bot 日志 `图片回复 model=<实际模型> key=<Key 名或 custom> prompt=<字数> bytes=<字节> ms=<毫秒>`；没有后台生图配置时 `model=` 是 `gemini-nano-banana-2.1`，`key=` 是当前聊天 Key；配了自定义生图 Key 时 `key=custom`。baseUrl 必须真的有 `/images/generations`（线上 `pgl` / `pg` 才有，`ds` 一定 404）。
 6. **成功行长这样**：`draw-image-4` 起应是 `回复成功 … len=<正文字数> image=1 …`；中继日志那一轮有两条 `请求`（第一条带 `draw_image`，第二条只带 `story_reply`，末尾消息带「已经发给用户了」）。`len=0` 只在第二段也交白卷时出现，那是纯图兜底。
 7. **库里存什么**：有正文就存正文；纯图兜底才存 `[图片]`（长度 4）。
 8. **Discord 侧核对**：纯图那条 `content` 为空、附件 `filename:"image.jpg"` / `content_type:"image/jpeg"` / 尺寸非零；有正文时先一条附件消息、紧跟一条正文消息（两段是两个请求，不会合并成一条带 caption 的消息）。

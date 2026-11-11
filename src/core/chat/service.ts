@@ -3,6 +3,7 @@ import type {
   BodyEmojiGuideStore,
   ChannelMemoryStore,
   ConversationStore,
+  ImageSettingsStore,
   KeyRepository,
   PromptDefaultsStore,
   PromptRepository,
@@ -114,6 +115,7 @@ import { VOICE_DIRECTIVE } from '../voice/directive';
 import { dropRefusalHistory } from './refusal-filter';
 import { replyToolsFor } from './reply-tool';
 import { IMAGE_MODEL_NAME, drawPromptOf, drawToolsFor, requestImage } from './image-tool';
+import { readImageSettings } from './image-settings';
 import { STAMP_OFFSET_MINUTES, stripStamp } from './stamp';
 import { unwrapToolReply, unwrapToolReplyStream } from './tool-shell';
 import { stripWrapperTags } from './wrapper-tags';
@@ -151,6 +153,8 @@ export interface ChatServiceDeps {
   worldBooks?: WorldBookStore;
   /** 世界书条目的粘性/冷却记账；没接线 = 不落库，粘性与冷却当轮不算（其余字段照常） */
   worldBookState?: WorldBookStateStore;
+  /** 生图自定义三层配置；没接线 = 默认模型 + 当前聊天 Key，行为与加这一层之前逐字相同 */
+  imageSettings?: ImageSettingsStore;
   providers: Record<ProviderId, LlmProvider>;
   /** 后台任务入口（Workers 里接 ctx.waitUntil）；缺省时任务直接丢弃，绝不影响本轮回复 */
   background?: (task: Promise<unknown>) => void;
@@ -572,6 +576,8 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
   const reactionModels: ReactionModelStore | undefined = deps.reactionModels;
   // 世界书粘性/冷却同样可选：没接线时只少一份记账，触发与拼段照旧
   const worldBookState: WorldBookStateStore | undefined = deps.worldBookState;
+  // 生图自定义同样可选：没接线时直接走默认模型与当前聊天 Key
+  const imageSettings: ImageSettingsStore | undefined = deps.imageSettings;
   const now = deps.now ?? ((): Date => new Date());
   // 不接线也不炸（§19.6）；钩子是外部实现，真抛错也只能在 emit 里吞掉，绝不带崩回复链路
   const log = deps.log ?? ((): void => undefined);
@@ -1611,25 +1617,33 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
           // 画图：调用已经攒齐，这里同步生成（15–30s），成功后本轮正文就是空——只发图
           if (drawPrompt !== null) {
             const imageStartedAt = Date.now();
+            // 只有真要画图时才读三层配置：普通回合不多查一次库
+            const configuredImage =
+              imageSettings === undefined
+                ? { model: IMAGE_MODEL_NAME, baseUrl: undefined, apiKey: undefined }
+                : await readImageSettings(imageSettings, ctx);
+            const imageBaseUrl = configuredImage.baseUrl ?? decrypted.baseUrl;
+            const imageApiKey = configuredImage.apiKey ?? decrypted.apiKey;
             try {
               imageResult = await requestImage({
-                baseUrl: decrypted.baseUrl,
-                apiKey: decrypted.apiKey,
+                baseUrl: imageBaseUrl,
+                apiKey: imageApiKey,
+                model: configuredImage.model,
                 prompt: drawPrompt,
                 fetch: callGlobalFetch,
               });
               emit(
                 'info',
                 'chat',
-                '图片回复 model=' + IMAGE_MODEL_NAME +
-                ' key=' + decrypted.label +
+                '图片回复 model=' + configuredImage.model +
+                ' key=' + (configuredImage.apiKey === undefined ? decrypted.label : 'custom') +
                 ' prompt=' + String(drawPrompt.length) +
                 ' bytes=' + String(imageResult.data.byteLength) +
                 ' ms=' + String(Date.now() - imageStartedAt),
               );
             } catch (error) {
               // 生成失败不能静默：这一轮宁可当空回重试，也不发一张空白图
-              emit('warn', 'chat', '图片生成失败 key=' + decrypted.label + ' ' + describeError(error));
+              emit('warn', 'chat', '图片生成失败 key=' + (configuredImage.apiKey === undefined ? decrypted.label : 'custom') + ' ' + describeError(error));
             }
             // 图有了就轮到正文：仍由主模型（4a）自己写一遍，和普通回合同一条路径。
             // 同一次响应里已经交了 story_reply 的话 raw 非空，不再多问一次

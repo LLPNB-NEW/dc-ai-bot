@@ -2,16 +2,22 @@ import { useEffect, useState } from 'react';
 import {
   SCOPE_LABELS,
   VISION_ENABLED_DEFAULT,
+  clearImageSetting,
   clearReplySettings,
   clearVisionSetting,
+  describeImageSettingsError,
   describeReplySettingsError,
   describeScopeTarget,
   describeVisionSettingsError,
+  fetchImageSettings,
   fetchReplySettings,
   fetchVisionSettings,
   normalizeScopeId,
+  saveImageSetting,
   saveReplySettings,
   saveVisionSetting,
+  type ImageSettingsRow,
+  type ImageSettingsSnapshot,
   type RevealStepsRow,
   type Scope,
   type VisionSettingsRow,
@@ -113,6 +119,78 @@ function describeVisionState(enabled: boolean): string {
   return enabled ? '开（主模型能看图）' : '关（主模型不看图）';
 }
 
+// 生图卡片的行查找与生效值：model / baseUrl / Key 三个字段各自从本层往上取第一个非空，
+// 不是整行覆盖，所以逐字段兜底，并把命中的来源层显示出来。
+function findImageRow(items: ImageSettingsRow[], scope: Scope, scopeId: string): ImageSettingsRow | undefined {
+  const target = normalizeScopeId(scope, scopeId);
+  return items.find((item) => item.scope === scope && item.scopeId === target);
+}
+
+interface ImageEffectiveField {
+  value: string;
+  /** 命中的那一层；null = 整条链都没配，落回 defaultModel / 当前聊天 Key。 */
+  from: ImageSettingsRow | null;
+}
+
+// 频道这一层只知道频道 ID、不知道它属于哪个服务器，所以 guild 层不参与；要按服务器兜请直接选 guild 层。
+function resolveImageField(
+  items: ImageSettingsRow[],
+  scope: Scope,
+  scopeId: string,
+  pick: (row: ImageSettingsRow) => string,
+): ImageEffectiveField {
+  const chain: ImageSettingsRow[] = [];
+  const self = findImageRow(items, scope, scopeId);
+  if (self !== undefined) chain.push(self);
+  if (scope !== 'global') {
+    const globalRow = findImageRow(items, 'global', '');
+    if (globalRow !== undefined) chain.push(globalRow);
+  }
+  for (const row of chain) {
+    const value = pick(row).trim();
+    if (value !== '') return { value, from: row };
+  }
+  return { value: '', from: null };
+}
+
+// 保存只换这一层的行：别的层没动，列表不用整份重拉，输入框也不会闪一下。
+function upsertImageRow(items: ImageSettingsRow[], row: ImageSettingsRow): ImageSettingsRow[] {
+  const index = items.findIndex((item) => item.scope === row.scope && item.scopeId === row.scopeId);
+  if (index < 0) return [...items, row];
+  const next = items.slice();
+  next[index] = row;
+  return next;
+}
+
+function describeImageModelValue(field: ImageEffectiveField, defaultModel: string): string {
+  if (field.value !== '') return field.value;
+  return defaultModel === '' ? '接口默认模型' : defaultModel;
+}
+
+function describeImageModelSource(field: ImageEffectiveField): string {
+  return field.from === null ? '接口默认模型' : describeScopeTarget(field.from.scope, field.from.scopeId);
+}
+
+function describeImageBaseUrlValue(field: ImageEffectiveField): string {
+  return field.value === '' ? '当前聊天 Key 的地址' : field.value;
+}
+
+function describeImageKeyValue(field: ImageEffectiveField): string {
+  return field.value === '' ? '当前聊天 Key' : '已保存 ' + field.value;
+}
+
+function describeImageFallbackSource(field: ImageEffectiveField): string {
+  return field.from === null ? '当前聊天 Key' : describeScopeTarget(field.from.scope, field.from.scopeId);
+}
+
+function describeImageRowSummary(row: ImageSettingsRow): string {
+  const parts: string[] = [];
+  if (row.model !== '') parts.push('模型 ' + row.model);
+  if (row.baseUrl !== '') parts.push('地址 ' + row.baseUrl);
+  if (row.keyHint !== '') parts.push('Key ' + row.keyHint);
+  return parts.length === 0 ? '空（三个字段全部沿用上层）' : parts.join(' · ');
+}
+
 export default function ReplyPage() {
   const [items, setItems] = useState<RevealStepsRow[]>([]);
   const [fallbackDefault, setFallbackDefault] = useState(BOOTSTRAP_DEFAULT);
@@ -136,6 +214,20 @@ export default function ReplyPage() {
   const [visionBusy, setVisionBusy] = useState('');
   const [visionMessage, setVisionMessage] = useState('');
   const [visionError, setVisionError] = useState('');
+
+  // 生图卡片独立一套 state：三个字段各有草稿，请求失败只脏它自己的提示。
+  const [imageItems, setImageItems] = useState<ImageSettingsRow[]>([]);
+  const [imageDefaultModel, setImageDefaultModel] = useState('');
+  const [imageLimits, setImageLimits] = useState({ model: 0, baseUrl: 0 });
+  const [imageLoaded, setImageLoaded] = useState(false);
+  const [imageScope, setImageScope] = useState<Scope>('global');
+  const [imageScopeId, setImageScopeId] = useState('');
+  const [imageModel, setImageModel] = useState('');
+  const [imageBaseUrl, setImageBaseUrl] = useState('');
+  const [imageApiKey, setImageApiKey] = useState('');
+  const [imageBusy, setImageBusy] = useState('');
+  const [imageMessage, setImageMessage] = useState('');
+  const [imageError, setImageError] = useState('');
 
   async function load(): Promise<void> {
     try {
@@ -164,9 +256,33 @@ export default function ReplyPage() {
     }
   }
 
+  // 草稿填的是「这一层自己存的值」，不是生效值：留空本来就表示沿用上层，预填生效值会把上层值抄下来。
+  function fillImageDraft(items: ImageSettingsRow[], scope: Scope, scopeId: string): void {
+    const row = findImageRow(items, scope, scopeId);
+    setImageModel(row === undefined ? '' : row.model);
+    setImageBaseUrl(row === undefined ? '' : row.baseUrl);
+    setImageApiKey('');
+  }
+
+  async function loadImage(): Promise<ImageSettingsSnapshot | null> {
+    try {
+      const snapshot = await fetchImageSettings();
+      setImageItems(snapshot.items);
+      setImageDefaultModel(snapshot.defaultModel);
+      setImageLimits(snapshot.limits);
+      setImageLoaded(true);
+      fillImageDraft(snapshot.items, imageScope, imageScopeId);
+      return snapshot;
+    } catch (err) {
+      setImageError(describeImageSettingsError(err));
+      return null;
+    }
+  }
+
   useEffect(() => {
     void load();
     void loadVision();
+    void loadImage();
   }, []);
 
   // 首屏拿到列表后把输入框预填成「当前选中层实际生效的值」：空输入框配上被禁用的保存按钮，
@@ -196,6 +312,24 @@ export default function ReplyPage() {
     setVisionMessage('');
     setVisionError('');
     setVisionDraft(resolveVisionEffectiveValue(visionItems, next, visionScopeId, visionDefault).enabled);
+  }
+
+  // 换层把这一层存的值填回表单；没配就留空 = 沿用，不会把上层的值存下来。
+  function selectImageScope(next: Scope): void {
+    setImageScope(next);
+    setImageMessage('');
+    setImageError('');
+    fillImageDraft(imageItems, next, imageScopeId);
+  }
+
+  // 填 ID 时只有表单还全空才载入这一层已存的值：已经打好的字不能被换 ID 洗掉。
+  function selectImageScopeId(next: string): void {
+    setImageScopeId(next);
+    setImageMessage('');
+    setImageError('');
+    if (imageModel.trim() === '' && imageBaseUrl.trim() === '' && imageApiKey.trim() === '') {
+      fillImageDraft(imageItems, imageScope, next);
+    }
   }
 
   const targetId = normalizeScopeId(scope, scopeId);
@@ -305,6 +439,99 @@ export default function ReplyPage() {
       setVisionError(describeVisionSettingsError(err));
     } finally {
       setVisionBusy('');
+    }
+  }
+
+  const imageTargetId = normalizeScopeId(imageScope, imageScopeId);
+  const imageTargetLabel = describeScopeTarget(imageScope, imageTargetId);
+  const imageRow = findImageRow(imageItems, imageScope, imageTargetId);
+  const imageModelEffective = resolveImageField(imageItems, imageScope, imageTargetId, (row) => row.model);
+  const imageBaseUrlEffective = resolveImageField(imageItems, imageScope, imageTargetId, (row) => row.baseUrl);
+  const imageKeyEffective = resolveImageField(imageItems, imageScope, imageTargetId, (row) => row.keyHint);
+  // guild / channel 层没填 ID 时后端一定 400，先禁用。
+  const imageScopeReady = imageScope === 'global' || imageTargetId !== '';
+  const imageDraftEmpty = imageModel.trim() === '' && imageBaseUrl.trim() === '' && imageApiKey.trim() === '';
+  // 新层三个字段全空 = 没有可存的东西；已存在的层允许用空值把某个字段改回「沿用上层」。
+  const imageSaveDisabled = imageBusy !== '' || !imageScopeReady || (imageRow === undefined && imageDraftEmpty);
+  const imageClearKeyDisabled =
+    imageBusy !== '' || !imageScopeReady || imageRow === undefined || imageRow.keyHint === '';
+  const imageRemoveDisabled = imageBusy !== '' || !imageScopeReady;
+
+  async function saveImage(): Promise<void> {
+    if (imageSaveDisabled) return;
+    setImageMessage('');
+    setImageError('');
+    setImageBusy('save');
+    const typedKey = imageApiKey.trim();
+    try {
+      const saved = await saveImageSetting({
+        scope: imageScope,
+        scopeId: imageTargetId,
+        model: imageModel,
+        baseUrl: imageBaseUrl,
+        // 留空 = 保留本层已存的密文：整个字段不送，而不是送空串。
+        ...(typedKey === '' ? {} : { apiKey: typedKey }),
+      });
+      // 只更新这一层的行：别的层没动，列表不重拉，草稿也不会闪。
+      setImageItems((previous) => upsertImageRow(previous, saved));
+      setImageModel(saved.model);
+      setImageBaseUrl(saved.baseUrl);
+      setImageApiKey('');
+      setImageMessage(
+        '已保存 ' +
+          describeScopeTarget(saved.scope, saved.scopeId) +
+          '：' +
+          (saved.model === '' ? '模型留空（沿用上层）' : '模型 ' + saved.model) +
+          ' · ' +
+          (saved.baseUrl === '' ? '地址留空（沿用上层）' : '地址 ' + saved.baseUrl) +
+          (typedKey === '' ? '' : ' · 已写入本层 Key'),
+      );
+    } catch (err) {
+      // 失败只写表单错误，输入原样留着，改完可以直接再点保存。
+      setImageError(describeImageSettingsError(err));
+    } finally {
+      setImageBusy('');
+    }
+  }
+
+  async function clearImageKey(): Promise<void> {
+    if (imageClearKeyDisabled || imageRow === undefined) return;
+    setImageMessage('');
+    setImageError('');
+    setImageBusy('key');
+    try {
+      // 只清 Key：model / baseUrl 原样送回，免得把这一层另外两项也清掉。
+      const saved = await saveImageSetting({
+        scope: imageScope,
+        scopeId: imageTargetId,
+        model: imageRow.model,
+        baseUrl: imageRow.baseUrl,
+        apiKey: '',
+      });
+      setImageItems((previous) => upsertImageRow(previous, saved));
+      setImageApiKey('');
+      setImageMessage('已清除 ' + imageTargetLabel + ' 的本层 Key（回到上层 / 当前聊天 Key）');
+    } catch (err) {
+      setImageError(describeImageSettingsError(err));
+    } finally {
+      setImageBusy('');
+    }
+  }
+
+  async function removeImage(): Promise<void> {
+    if (imageRemoveDisabled) return;
+    setImageMessage('');
+    setImageError('');
+    setImageBusy('delete');
+    try {
+      await clearImageSetting({ scope: imageScope, scopeId: imageTargetId });
+      setImageMessage('已删除 ' + imageTargetLabel + ' 的配置（这一层恢复上层）');
+      // 删的是整层，按契约刷新列表；拉取失败只落在 imageError，不把这次删除说成失败。
+      await loadImage();
+    } catch (err) {
+      setImageError(describeImageSettingsError(err));
+    } finally {
+      setImageBusy('');
     }
   }
 
@@ -437,6 +664,122 @@ export default function ReplyPage() {
                 <span className="reply-scope">{SCOPE_LABELS[item.scope]}</span>
                 <span className="reply-id">{item.scopeId === '' ? '—' : item.scopeId}</span>
                 <span className={'vision-value' + (item.enabled ? '' : ' off')}>{item.enabled ? '开' : '关'}</span>
+                <span className="reply-time">{formatUpdatedAt(item.updatedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>生图（自定义模型 / 地址 / Key）</h2>
+        <p className="hint">
+          三层配置 channel &gt; guild &gt; global：模型 / 地址 / Key 各自取第一个非空值；三项都空才用默认模型与当前聊天 Key。
+        </p>
+        <p className="hint">保存只写选中这一层；输入留空 = 沿用上层，不会把上层的值抄到本层。</p>
+        <ScopeField
+          scope={imageScope}
+          scopeId={imageScopeId}
+          onScopeChange={selectImageScope}
+          onScopeIdChange={selectImageScopeId}
+        />
+        {imageLoaded ? null : <p className="hint">正在读取生图配置…</p>}
+        <label className="field">
+          <span>
+            生图模型（model）
+            {imageLimits.model > 0 ? '，最多 ' + String(imageLimits.model) + ' 字' : ''}
+          </span>
+          <input
+            type="text"
+            value={imageModel}
+            maxLength={imageLimits.model > 0 ? imageLimits.model : undefined}
+            placeholder={
+              imageDefaultModel === ''
+                ? '留空 = 沿用上层 / 接口默认模型'
+                : '留空 = 沿用上层 / 默认 ' + imageDefaultModel
+            }
+            onChange={(event) => setImageModel(event.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>
+            生图地址（baseUrl）
+            {imageLimits.baseUrl > 0 ? '，最多 ' + String(imageLimits.baseUrl) + ' 字' : ''}
+          </span>
+          <input
+            type="text"
+            value={imageBaseUrl}
+            maxLength={imageLimits.baseUrl > 0 ? imageLimits.baseUrl : undefined}
+            placeholder="留空 = 沿用上层 / 当前聊天 Key 的地址"
+            onChange={(event) => setImageBaseUrl(event.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>生图 Key（apiKey）</span>
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={imageApiKey}
+            placeholder={
+              imageRow === undefined || imageRow.keyHint === ''
+                ? '留空 = 沿用上层 / 当前聊天 Key'
+                : '已保存 ' + imageRow.keyHint + '；留空 = 保留本层 Key'
+            }
+            onChange={(event) => setImageApiKey(event.target.value)}
+          />
+        </label>
+        <div className="field">
+          <span>当前生效值（按选中层 → 全局 → 默认）</span>
+          <ul className="reply-list image-effective">
+            <li>
+              <span className="reply-scope">模型</span>
+              <span className="image-effective-value">
+                {describeImageModelValue(imageModelEffective, imageDefaultModel)}
+              </span>
+              <span className="reply-time">来自 {describeImageModelSource(imageModelEffective)}</span>
+            </li>
+            <li>
+              <span className="reply-scope">地址</span>
+              <span className="image-effective-value">{describeImageBaseUrlValue(imageBaseUrlEffective)}</span>
+              <span className="reply-time">来自 {describeImageFallbackSource(imageBaseUrlEffective)}</span>
+            </li>
+            <li>
+              <span className="reply-scope">Key</span>
+              <span className="image-effective-value">{describeImageKeyValue(imageKeyEffective)}</span>
+              <span className="reply-time">来自 {describeImageFallbackSource(imageKeyEffective)}</span>
+            </li>
+          </ul>
+        </div>
+        <p className="hint">
+          频道所属的服务器在后台定位不到，所以生效值只按「选中层 → 全局 → 默认」兜；要按服务器兜请直接选服务器层。
+        </p>
+        {imageMessage === '' ? null : <p className="ok">{imageMessage}</p>}
+        {imageError === '' ? null : <p className="error">{imageError}</p>}
+        <div className="actions">
+          <button type="button" className="primary" disabled={imageSaveDisabled} onClick={() => void saveImage()}>
+            {imageBusy === 'save' ? '保存中…' : '保存这一层'}
+          </button>
+          <button type="button" className="ghost" disabled={imageClearKeyDisabled} onClick={() => void clearImageKey()}>
+            {imageBusy === 'key' ? '清除中…' : '清除本层 Key'}
+          </button>
+          <button type="button" className="danger" disabled={imageRemoveDisabled} onClick={() => void removeImage()}>
+            {imageBusy === 'delete' ? '删除中…' : '清除这一层'}
+          </button>
+        </div>
+        <p className="hint">已配置的层（优先级 channel &gt; guild &gt; global）；空字段表示这一层没设、继续沿用上层。</p>
+        {imageItems.length === 0 ? (
+          <p className="hint">
+            三层都还没有配置，现在用
+            {imageDefaultModel === '' ? '接口默认模型' : '默认模型 ' + imageDefaultModel}
+            与当前聊天 Key。
+          </p>
+        ) : (
+          <ul className="reply-list">
+            {imageItems.map((item) => (
+              <li key={item.scope + ':' + item.scopeId}>
+                <span className="reply-scope">{SCOPE_LABELS[item.scope]}</span>
+                <span className="reply-id">{item.scopeId === '' ? '—' : item.scopeId}</span>
+                <span className="image-row-summary">{describeImageRowSummary(item)}</span>
                 <span className="reply-time">{formatUpdatedAt(item.updatedAt)}</span>
               </li>
             ))}

@@ -87,6 +87,9 @@ const PROTECTED_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'PATCH', path: '/api/keys/any-id' },
   { method: 'DELETE', path: '/api/keys/any-id' },
   { method: 'POST', path: '/api/keys/any-id/test' },
+  { method: 'GET', path: '/api/image-settings' },
+  { method: 'PUT', path: '/api/image-settings' },
+  { method: 'DELETE', path: '/api/image-settings' },
   { method: 'GET', path: '/api/conversations?guildId=g1&channelId=c1' },
   { method: 'POST', path: '/api/logout' },
 ];
