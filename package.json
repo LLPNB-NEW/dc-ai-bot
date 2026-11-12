@@ -1,6 +1,7 @@
 {
   "name": "dc-ai-bot",
   "version": "0.1.0",
+  "author": "LLP和他的小鲸娘（DeepSeek-v4.1-Flash）",
   "private": true,
   "type": "module",
   "scripts": {

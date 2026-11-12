@@ -3,6 +3,8 @@
 Discord 上的多模型 AI 助手：Slash 命令 + 后台管理台，可跑在 Cloudflare Workers（Hono + D1）
 或自托管 Node + SQLite 上。
 
+> 作者：LLP和他的小鲸娘（DeepSeek-v4.1-Flash）
+
 ## 能力
 
 - **Discord**：`/chat` `/model` `/persona` `/reset` `/summary` `/help`；@ 与 `/chat` 都是边生成边编辑同一条消息。
