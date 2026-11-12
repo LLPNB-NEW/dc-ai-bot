@@ -3198,19 +3198,19 @@ CREATE TABLE IF NOT EXISTS reaction_templates (
 
 ### 43.1 为什么要有
 
-- 现状只有两个计数器：中继每个执行器各维护一份 `requestsServed` / `requestsFailed`（`server/server.js:488-489`，在 `:560` / `:563` 累加），它们回答「失败了几次」，不回答「哪一步、为什么」。
+- 现状只有两个计数器：中继每个执行器各维护一份 `requestsServed` / `requestsFailed`（`studio-api 的 server.js:488-489`，在 `:560` / `:563` 累加），它们回答「失败了几次」，不回答「哪一步、为什么」。
 - 502 与 `executor_timeout` 之间差着一整条排查路：`docs/operations.md` §31 只能看到 bot 这侧的 `ALL_PROVIDERS_FAILED` 与错误串，看不到中继那端是执行器超时、还是上游回了非 200。
 - 所以把失败条目**留在中继内存里**，用一条只读端点取出来：不落库、不新增表、不新增迁移（仍是 18 个，`0018` 是 §41 的 `vision_settings`）。
-- **绝不记录**：prompt 正文、图片 base64、完整 Key、`Authorization` 头——`server/server.js:176` 那行注释就是这条边界。条目里只有量纲与错误串，与 §13「明文密钥永不进日志」同一条口径。
+- **绝不记录**：prompt 正文、图片 base64、完整 Key、`Authorization` 头——`studio-api 的 server.js:176` 那行注释就是这条边界。条目里只有量纲与错误串，与 §13「明文密钥永不进日志」同一条口径。
 
 ### 43.2 数据从哪来
 
-- **中继一侧**：`GET /admin/errors?limit=N`，经 Caddy 时对外是 `/pg/admin/errors`（`docs/hosting.md` §15）。分发在 `server/server.js:1438`，处理函数 `handleAdminErrors`（`:1467`）。
-  - 鉴权沿用中继现有的 Key 名单：`Authorization: Bearer <key>`，key 必须通过 `keyAllowed(key)`（`server/server.js:169`）。缺 key → 401 `{ "error": { "code": "api_key_required", "message": "缺少 API Key" } }`；key 不在名单里 → 401 `{ "error": { "code": "api_key_rejected", "message": "API Key 无效" } }`。鉴权失败**不记账**（`:1465` 的注释：读缓冲的动作不能把自己写进缓冲）。
-  - `limit` 解析失败按 200，越界夹到 1..200，不报错（`clampErrorLimit`，`server/server.js:238`）。
-- **缓冲**：`recentErrors`（`server/server.js:183`），容量 `RECENT_ERROR_LIMIT = 200`（`:179`）；写满从最旧的挤掉，被挤掉的累计在 `recentErrorsDropped`（`:184`）里，就是响应里的 `dropped`。**进程重启即清空**——它不是审计日志。
-- **记账点只有一个**：`recordError({ status, code, message, model, key, durationMs, requestId, retries })`（`server/server.js:194`），顶层 catch 与两条流式 catch 都经 `recordFailure`（`:214`）进来，避免漏记或双记。
-- **取快照**：`recentErrorFeed(limit)`（`server/server.js:245`），新 → 旧，最多 `limit` 条。
+- **中继一侧**：`GET /admin/errors?limit=N`，经 Caddy 时对外是 `/pg/admin/errors`。分发在 `studio-api 的 server.js:1438`，处理函数 `handleAdminErrors`（`:1467`）。
+  - 鉴权沿用中继现有的 Key 名单：`Authorization: Bearer <key>`，key 必须通过 `keyAllowed(key)`（`studio-api 的 server.js:169`）。缺 key → 401 `{ "error": { "code": "api_key_required", "message": "缺少 API Key" } }`；key 不在名单里 → 401 `{ "error": { "code": "api_key_rejected", "message": "API Key 无效" } }`。鉴权失败**不记账**（`:1465` 的注释：读缓冲的动作不能把自己写进缓冲）。
+  - `limit` 解析失败按 200，越界夹到 1..200，不报错（`clampErrorLimit`，`studio-api 的 server.js:238`）。
+- **缓冲**：`recentErrors`（`studio-api 的 server.js:183`），容量 `RECENT_ERROR_LIMIT = 200`（`:179`）；写满从最旧的挤掉，被挤掉的累计在 `recentErrorsDropped`（`:184`）里，就是响应里的 `dropped`。**进程重启即清空**——它不是审计日志。
+- **记账点只有一个**：`recordError({ status, code, message, model, key, durationMs, requestId, retries })`（`studio-api 的 server.js:194`），顶层 catch 与两条流式 catch 都经 `recordFailure`（`:214`）进来，避免漏记或双记。
+- **取快照**：`recentErrorFeed(limit)`（`studio-api 的 server.js:245`），新 → 旧，最多 `limit` 条。
 
 ### 43.3 字段与语义
 
@@ -3218,12 +3218,12 @@ CREATE TABLE IF NOT EXISTS reaction_templates (
 
 | 字段 | 类型 | 语义 |
 | --- | --- | --- |
-| `at` | string | 失败发生时刻，ISO 时间串（`server/server.js:196`） |
+| `at` | string | 失败发生时刻，ISO 时间串（`studio-api 的 server.js:196`） |
 | `status` | number | HTTP 状态码；拿不到就记 500（`:197`） |
 | `code` | string | 错误码，形如 `executor_timeout`、`api_key_rejected`；缺省 `internal_error` |
 | `message` | string | 一句中文原因，**截断到 500 字符**（`formatErrorMessage`，`:187`；重试过会带「（已重试 N 次）」后缀，后缀也算在这 500 里） |
 | `model` | string? | 这次请求的模型名；取不到就不出现这个键 |
-| `key` | string? | **掩码后**的 Key（`maskKey`，`server/server.js:81`），只留头尾几位；原值永不出现 |
+| `key` | string? | **掩码后**的 Key（`maskKey`，`studio-api 的 server.js:81`），只留头尾几位；原值永不出现 |
 | `durationMs` | number? | 从请求进来到失败交给调用方的毫秒数，非负整数 |
 | `requestId` | string? | 中继给这次请求的 id，与中继日志里的那个一致，用来对齐 |
 
@@ -3251,10 +3251,10 @@ CREATE TABLE IF NOT EXISTS reaction_templates (
 
 | 位置 | 作用 |
 | --- | --- |
-| `server/server.js:174-211` | 环形缓冲本体：`RECENT_ERROR_LIMIT` / `RECENT_ERROR_MESSAGE_MAX`（`:179-180`）、`formatErrorMessage`（`:187`，500 字截断）、`recordError`（`:194`，唯一记账入口，`key` 过 `maskKey`）、挤掉计数（`:206-209`） |
-| `server/server.js:214` | `recordFailure(error, context, fallback)`：顶层 catch 与两条流式 catch 共用 |
-| `server/server.js:238` / `:245` | `clampErrorLimit`（1..200 夹紧）/ `recentErrorFeed`（新 → 旧 + `dropped`） |
-| `server/server.js:1438` / `:1467` | 路由分发 / `handleAdminErrors`（Bearer + `keyAllowed`，401 两种错误码） |
+| `studio-api 的 server.js:174-211` | 环形缓冲本体：`RECENT_ERROR_LIMIT` / `RECENT_ERROR_MESSAGE_MAX`（`:179-180`）、`formatErrorMessage`（`:187`，500 字截断）、`recordError`（`:194`，唯一记账入口，`key` 过 `maskKey`）、挤掉计数（`:206-209`） |
+| `studio-api 的 server.js:214` | `recordFailure(error, context, fallback)`：顶层 catch 与两条流式 catch 共用 |
+| `studio-api 的 server.js:238` / `:245` | `clampErrorLimit`（1..200 夹紧）/ `recentErrorFeed`（新 → 旧 + `dropped`） |
+| `studio-api 的 server.js:1438` / `:1467` | 路由分发 / `handleAdminErrors`（Bearer + `keyAllowed`，401 两种错误码） |
 | `src/core/pg-errors.ts` | 纯逻辑层：`clampPgErrorsLimit`（`:14`）、`PgErrorsSource`（`:20`）、`PgErrorsUnavailableError`（`:26`）、`readEntry` / `readFeed`（`:60` / `:81`）、`createRelayErrorSource`（`:113`）、`createUnconfiguredErrorSource`（`:153`） |
 | `src/core/types.ts:422` | `PgErrorFeed`：`limit` / `dropped` / `items` 的类型面（条目就是 §43.3 那几项） |
 | `src/workers/http/app.ts:149-150` / `:757-769` | 依赖注入位（`deps.pgErrors`，未注入即 501）/ 路由本体（501 与 502 两个分支） |
@@ -3264,7 +3264,7 @@ CREATE TABLE IF NOT EXISTS reaction_templates (
 | `src/workers/gateway/engine.ts:129` | `GATEWAY_BUILD` 这一版是 `preset-import-2`（现版：导入酒馆预设时，预设里自己关着的段也带进来、保持停用，后台可逐段打开；停用段不搬去深度注入，宏照样映射，§58；无新迁移、迁移总数仍是 30。上一版 `context-stream-1`（上下文工具模式的上游从非流式 `chat()` 改成流式 `chatStream()`（`stream: true`），但仍整段攒完才交付、分支内一次进度都不推；适配器把 `choices[0].delta.tool_calls` 逐帧交出来（`ToolCallDelta`），服务层按 `index` 拼回完整工具调用再交给 `readToolReply`，空回与续写的判据一个字没动，§57）。再上一版 `preset-import-1`（酒馆预设导入可以选层——`scope` = `global` / `guild` / `channel`，整层覆盖目标层、其它层不动，采样参数按目标层继承，历史后指令写同一层的深度注入，原始 JSON 按层各存一行，§56）。再上一版 `context-tool-5`（把钉死的 `tool_choice` 改回 `'auto'`，`src/core/chat/service.ts:1236`）、`context-tool-4`（已回退，曾把 `tool_choice` 钉成回复工具）、`context-tool-3`（上下文工具模式首版），三版定位见 §55.1）；再往前 `reply-tool-3`（271151§54）；前一版 `reply-tool-1`（把模型写在正文里的 `story_reply` 工具调用壳剥掉再发——壳不再作为正文发到频道；同时把 tools 定义发进请求，当前中继对 tools 是空转的兼容性保留，无新迁移、迁移总数仍 29，§54）；再前一版 `identity-off-1`（有预设段时不再追加身份块——这一轮有效提示词里只要有任何启用的 `before` 段，`system` 里就没有身份块；身份块只在没有前置预设段时兜底，无新迁移、迁移总数仍 29，§53）；再再前一版 `preset-head-1`（预设 `before` 段回到 `system` 天头、长期记忆摘要搬出 `system` 改拼在本轮那条 user 消息最前面，无新迁移、迁移总数仍 29，§52）；再再再前一版 `identity-head-1`（身份块去掉 Discord 平台措辞、平台元信息回到天头，无新迁移、迁移总数仍 29，§52）；再往前 `preset-4`（阶段四：酒馆预设导入的段顺序按提示词链还原，迁移总数仍 29，§48.8）；`preset-3`（阶段三：世界书 + 酒馆预设导入器修正，新增迁移 `0029_world_books.sql`、迁移总数 29，§51、§48.7）；`preset-2`（阶段二：路由采样参数 + 深度注入，新增迁移 `0027_route_sampling.sql`、`0028_prompt_injections.sql`、迁移总数 28，§49、§50）；`preset-1`（酒馆预设导入阶段一：POST /api/prompts/import 把整份 SillyTavern 预设的文本段整层覆盖 global 层，迁移总数 26，§48）；再更早的 `'director-6'`（只把诊断用的 judge 行从截断改成完整一行：语音成功日志的 `judge=` 段与后台试听响应的 `judgeLine` 现在都放判断模型回的完整一行、不截断，`0` / `1` / `2` 三档念法、提示词、接口字段与位置、迁移（仍是 `0025_director_mode.sql`、总数 25）都没动；副作用是日志行可能变长，排错时按行读即可，§47.8、§25.16）；前一版 `'director-5'`（只改导演档（`1` / `2` 档）那句内置提示词 `JUDGE_DIRECTOR_COMMON`：正文每一句前面都要加一个括号标签写语气或说话方式（如（轻声）、（语速加快）、（笑着）），唱歌时整体风格组里要有一个 `(唱歌)`（形如 `(唱歌 温柔)`），整段歌词只在这一个地方标一次、不要给每句歌词加标签，歌词用中文；每句标签都是成对括号组，`1` 档剥掉后仍与原文逐字相同；`0` 档 `JUDGE_SYSTEM`、`2` 档字数护栏、接口、日志字段与后台 UI 一个字没动，没有新迁移（仍是 `0025_director_mode.sql`、总数 25），§47.8、§25.16）；再前一版 `'director-4'`（把 judge 那一行带进日志与试听：真实语音成功日志在 `rejected=` 之后多一个可选的 `judge=` 段，只放 judge 那一行（完整一行、不截断；`src/core/voice/style.ts:431` 的 `input.onJudgeLine?.(line)` 原样交出，包在 try/catch 里，回调抛错不影响念法），judge 没答上来时整段不出现（没配 judge、超时、非 2xx、坏 JSON、抛异常都算，此时 `rejected=judge`）；后台试听响应多一个 `judgeLine`（`string \| null`，`src/workers/http/app.ts:1468`、响应 `:1516`，前端 `web/src/api.ts:2183`），页面在「导演模式…（退回原文：…）」之后多一行「判断模型写的是：…」，只在 `directorRejected` 不为 `null` 时显示；这一版解决的是 1 档退回时只看到 `rejected=verbatim`、判断不了模型到底怎么写的——现在能直接对比 judge 那一行与原文，区分「模型没写」「写歪了」「没答上来」（没答上来时既没有 `judge=` 段，`rejected=` 又是 `judge`）；日志口径随之从「正文绝不整段进日志」细化为「正文绝不整段进日志；judge 那一行整行带上，用于排查，不截断」；没有新迁移（仍是 `0025_director_mode.sql`、总数 25），§47.8、§25.14、§25.16、§19.1，前一版）；再前一版 `'director-3'` 是「判断超时按字数给预算 + 多一种 `judge` 退回原因」那版（固定 8 秒改成 15 秒起步 + 每字 40 毫秒、封顶 45 秒，入口 `judgeTimeoutMs(chars)`，§44.3、§47.8、§25.16）；**再前一版** `'director-2'` 是导演模式可观测性补丁（念法仍是前一版那一套——judge 先按 mimo 导演模式改写要念的文本，Discord 上显示的文字仍是原文；三档 `director` = `0` 关闭（逐字朗读，与上一版逐字相同）/ `1` 只插标签 / `2` 允许顺句改写，存 `voice_settings.director`，`1` 档把候选与原文里的成对括号段都删掉之后必须逐字相同、`2` 档去标签后字数要在原文 0.3–3 倍之间（原文不足 20 字时上限 = 原文 + 200 字）且不许残留 `[[voice]]` 之类双方括号指令，越界一律退回原文；放行时语音文本就是 judge 那一整行、tag 置空（风格组已长在正文开头，再拼前缀会念两遍）；judge 未配置 / 非 2xx / 坏 JSON / 异常一律退回原文，绝不让导演模式把一条回复弄失败；迁移 `0025_director_mode.sql`（`ALTER TABLE voice_settings ADD COLUMN director INTEGER NOT NULL DEFAULT 0`），迁移总数 25、首启 `applied=25 skipped=0`、从 24 升上来 `applied=1 skipped=24`；后台「语音」页多一个「导演模式」下拉、保存随 `mode` / `voice` / `speed` 整行 `PUT`（三层各存一行、没有 `PATCH`）；这一版把后台试听也接上导演档——body 里带可选 `director`（缺省 `0` = 不走导演提示词，非 `0` / `1` / `2` 回 `400 BAD_DIRECTOR_MODE`，校验排在「TTS 未配置」之后）才让 judge 按导演模式改写，响应在 `styleUsed` 之后多 `director` 与 `directorRejected`（`null` 或 `empty` / `verbatim` / `residue` / `ratio`）；成功日志从这一版起在导演模式退回原文时多一个可选的 `rejected=` 段（`[voice] 已发送 tag=<标签> bytes=<字节数> 字数=<字数> mode=<0|1|2> director=<0|1|2>[ rejected=<empty|verbatim|residue|ratio|judge>]`，方括号里的 `rejected=` 段是 `'director-2'` 起才有的可选段、只有导演模式退回原文时才出现（放行时与 `'director-1'` 逐字相同），tag 优先取风格组、都空写 `tag=无`，字数按真正送进合成的文本算），§44.3、§47.8、§25.16，前一版）；**再前一版** `'director-1'` 是导演模式第一版（judge 先按 mimo 导演模式改写要念的文本、Discord 上显示仍是原文、三档 `director` = `0` / `1` / `2` 与四条护栏都是这一版定的，但后台试听固定按 `0` 档、响应里既没有 `director` 也没有 `directorRejected`、成功日志没有 `rejected=` 段，§47.8）；**更早的** `'voice-log-1'` 是**补一条成功日志**那版（`[voice] 已发送 tag=… bytes=… 字数=… mode=… director=…`，只记标签 / 字节数 / 字数 / mode / director，正文绝不整段进日志（`director-4` 起这条末尾还会多一个可选的 `judge=` 段，带 judge 那一行的完整一行、不截断，用于排查）；没有新迁移，仍是 `0024`、迁移总数 24，§44.3、§47.7），**再更早的** `'tts-nolimit-1'` 是「朗读不再有任何字数上限」那一版（朗读正文只做清理、后台试听只去首尾空白，念多长由上游接口决定；judge 的输出上限从 1200 提到 4000，好让长正文整段抄回来（抄不全就标签保留、正文用原文）；没有新迁移（仍是 `0024`、迁移总数 24），§44.3、§46.3、§47.7）；更早的 `'tts-tags-1'` 是「assistant 正文开头的标签 + 正文逐字校验」那一版（§47、§47.7）；再更早的 `'tts-style-1'` 是「一行自然语言语气指令放在 `role:user` 消息里」那一版（§47）；`'tts-mimo-1'` 那一版记的是§46.7：接口类型可选 OpenAI 兼容 `/audio/speech` 或小米 MiMo `chat/completions`，老行默认 `openai`、行为不变；日志里 `build=reply-tool-3` 才说明在位（`tts-admin-1` 是 §46 那一版、前一版：TTS 接口搬进后台、后台「语音」页配 + 试听；`prompt-scope-1` 是 §45 那一版、再前一版：内置默认与身份块可编辑；`voice-2` 是 §44.1 那一版、更早：按指令模式补上【语音】提示段；`voice-1` 是 §44 那一版、更早：文字回复结束后可发一条语音附件、三档三层开关；`pg-errors-1` 是 §43 那一版，再前一版） |
 
 - 本版没有新表、没有新迁移：迁移仍是 18 个，`0018` 是 §41 的 `vision_settings`。
-- 本版只有一条新路由（`GET /api/pg-errors`）与两个新环境变量（`PG_ERRORS_URL` / `PG_ERRORS_TOKEN`），落盘步骤在 `docs/hosting.md` §15.8。
+- 本版只有一条新路由（`GET /api/pg-errors`）与两个新环境变量（`PG_ERRORS_URL` / `PG_ERRORS_TOKEN`）。
 - 代码地图里的行号按落地时的代码写；实现如果又挪了位置，以文件里的函数名为准。
 
 ## 44. 语音回复（`voice-2`，§45 起是前一版；`voice-1` 是它前一版；TTS 配置 §46 起在后台「语音」页，§47 起带朗读语气——`tts-style-1` 是「自然语言语气行 + `role:user` 消息」，`tts-tags-1` 起改成「assistant 正文开头的标签 + 正文逐字校验」，`tts-nolimit-1` 起不再限制字数，`voice-log-1` 起语音发出后补一条成功日志）
@@ -5314,7 +5314,7 @@ export interface ToolCallDelta {
 
 ### 69.1 缺的是什么
 
-- 中继早就有生图端点（`POST /v1/images/generations`，见 `docs/hosting.md` §15.5），但 bot 侧没有入口：模型只能写字，要图就得人去别处画。
+- 中继早就有生图端点（`POST /v1/images/generations`），但 bot 侧没有入口：模型只能写字，要图就得人去别处画。
 - 想要的形态不是斜杠命令，而是预设里一句「想画就调 `draw_image`」：模型自己判断该画，画出来那一轮只发图、不配台词，历史里留一个占位让下一轮知道自己画过。
 
 ### 69.2 决定
@@ -5396,7 +5396,7 @@ export interface ToolCallDelta {
 - `TtsDialect` 变成 `'openai' | 'mimo' | 'gemini'`；`DEFAULT_MODEL` 里 gemini 是 `gemini-3.8-flash-tts`；`createGeminiTts` 打 `POST {url}/audio/speech`，body `{ model, input, response_format: 'wav', voice? }`。
 - 产物是 24kHz 单声道 WAV，所以 `TtsPort` 多了一条可选 `file: { name, contentType }`（`voice.wav` / `audio/wav` vs `voice.mp3` / `audio/mpeg`），`src/workers/gateway/engine.ts:830` 发附件时把 `tts.file` 传给 `sendFile`，后台试听的 `contentType` 也跟着端口走。
 - 迁移 `migrations/0032_tts_gemini_dialect.sql`：SQLite 改不了 CHECK，只能重建表（12 列原样搬过去，`CHECK (dialect IN ('openai','mimo','gemini'))`）。
-- 中继侧见 `docs/hosting.md` §15.5「语音合成：POST /v1/audio/speech 出 24kHz WAV」：音色在 `generation_config[15]`，上游回 `audio/l16` 分片，中继拼 PCM 再套 WAV 头；中继的超时也全部改成 `.env` 读（`TTS_TIMEOUT_MS` / `URL_READ_TIMEOUT_MS` / `KEEPALIVE_TIMEOUT_MS` / `HEADERS_TIMEOUT_MS`），临时诊断口 `POST /v1/_probe` 已删。
+- 中继侧的语音合成走 `POST /v1/audio/speech`，出 24kHz WAV：音色在 `generation_config[15]`，上游回 `audio/l16` 分片，中继拼 PCM 再套 WAV 头；中继的超时也全部改成 `.env` 读（`TTS_TIMEOUT_MS` / `URL_READ_TIMEOUT_MS` / `KEEPALIVE_TIMEOUT_MS` / `HEADERS_TIMEOUT_MS`），临时诊断口 `POST /v1/_probe` 已删。
 
 ### 70.5 测试与门槛
 

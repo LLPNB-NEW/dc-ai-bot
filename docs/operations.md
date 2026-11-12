@@ -1653,21 +1653,21 @@ Discord 对同一频道的 PATCH 有桶限制，上面这组值留了余量；�
 
 | 看到什么 | 怎么读 |
 | --- | --- |
-| `executor_timeout`，耗时那一列几万毫秒 | 中继把请求交给执行器后没等到回应。多半是那台机器上的有头 Chrome / Xvfb 卡住，或同一把 key 的请求排太长（`docs/hosting.md` §15）。先看中继日志里的执行器几行，再看那台机器的负载 |
+| `executor_timeout`，耗时那一列几万毫秒 | 中继把请求交给执行器后没等到回应。多半是那台机器上的有头 Chrome / Xvfb 卡住，或同一把 key 的请求排太长。先看中继日志里的执行器几行，再看那台机器的负载 |
 | `502` 一类非 2xx 的状态 + 原因里带上游的话 | 中继的上游（playground）回了非 200，原因那列就是它转述的原话。同一时段多条同码，按上游故障处理，别在 bot 这侧改配置 |
-| `api_key_required` / `api_key_rejected` | 执行器连中继时没带 key、或那把 key 不在中继 `.env` 的 `API_KEYS` 里（`server/server.js:618` / `:624`）。这是中继内部握手失败，不是 bot 的回复请求失败 |
+| `api_key_required` / `api_key_rejected` | 执行器连中继时没带 key、或那把 key 不在中继 `.env` 的 `API_KEYS` 里（`studio-api 的 server.js:618` / `:624`）。这是中继内部握手失败，不是 bot 的回复请求失败 |
 | 模型那列有值、key 那列是掩码 | 能对上「哪把 key 跑哪个模型」；掩码只留头尾几位，想看完整 key 只能去后台「密钥」页看 hint（见 `docs/architecture.md` §11 的 `GET /api/keys`，那里也只回 `keyHint`） |
 | 原因末尾带「（已重试 N 次）」 | 这一条是重试过 N 次才交出来的；原因本身最多 500 字符，超出就被截断 |
 | 顶部「共 N 条（已丢弃 M 条）」 | `N` 是当前条数（不会超过 200）；`M` 是中继进程启动以来被挤出缓冲的累计条数。`M` 变大不是故障，只说明更早的看不到了 |
 
-- **中继重启就清空**：缓冲只在进程内存里，不是审计日志。要留证据就翻中继的 docker 日志（`docs/hosting.md` §15）。
+- **中继重启就清空**：缓冲只在进程内存里，不是审计日志。要留证据就翻中继的 docker 日志。
 - **这页会自己定时拉**，忙的时候可以「暂停自动刷新」，徽标会写当前状态；单条能复制，也能一次复制全部，贴给别人比对截图省事。
 
 **501 与 502 各意味着什么**：
 
 | 结果 | 页面上看到 | 真实含义 | 怎么办 |
 | --- | --- | --- | --- |
-| 501 | 「未配置 PG 中继：后台缺环境变量 PG_ERRORS_URL / PG_ERRORS_TOKEN」 | bot 根本没拿到中继地址或 token（`src/node/main.ts:140-144`），这条路由回 `PG_ERRORS_UNAVAILABLE`。**其它页面与 `/api/health` 完全不受影响** | 照 `docs/hosting.md` §15.8 给 bot 补两个环境变量、`docker compose up -d` 重启；不补也只是这一页没有数据源 |
+| 501 | 「未配置 PG 中继：后台缺环境变量 PG_ERRORS_URL / PG_ERRORS_TOKEN」 | bot 根本没拿到中继地址或 token（`src/node/main.ts:140-144`），这条路由回 `PG_ERRORS_UNAVAILABLE`。**其它页面与 `/api/health` 完全不受影响** | 给 bot 补两个环境变量、`docker compose up -d` 重启；不补也只是这一页没有数据源 |
 | 502 | 「中继暂时取不到报错：<一句中文原因>」 | 地址配了，但这次没拿到可用数据：连不上、超时、中继回非 200、返回不是 JSON、形状不对（`src/core/pg-errors.ts:113-150`）。`detail` 就是那句原因 | 先读 `detail`：连不上 / 超时改地址与网络；中继回 401 多半是 `PG_ERRORS_TOKEN` 不在中继 `API_KEYS` 里；中继回 5xx 看中继日志 |
 
 - 501 / 502 **不会**把表洗成空：上一次成功拉到的数据还留在表里，失败提示单独挂着。
@@ -1979,7 +1979,7 @@ docker compose exec bot node -e "fetch('http://127.0.0.1:8787/api/health').then(
 主对话接图（§19.7）之后这类抱怨按三点排查，缺一条就是那一环没通——**先看后台「回复」页第二张卡片的识图开关有没有被关掉**（`vision-main-2` 起可按 global / guild / channel 三层关，默认开）：关掉时主模型看不到图，**但表情模型仍能看到这一轮的图**——这时请求里确实没有图，不是 bug，开关本身见 §19.8。三点是：
 
 1. **网关有没有拿到图片引用**：最多 4 张（`MAX_IMAGES = 4`，`src/workers/gateway/images.ts:11`）、单张 ≤ 5MB（`MAX_IMAGE_BYTES = 5 * 1024 * 1024`，`:14`）、只认 `image/*`。超限 / 类型不对在收集阶段**静默丢弃、不打日志**（§19.2、§19.3），表现就是「明明发了图，它却说没看到」——视频、PDF、超 5MB、`size` 缺失都算这一类。读图本身抛错才会留 `[chat] 读取图片失败，按无图继续：<reason>`。
-2. **中继有没有把图转成图片 part**：中继日志里会写跳过原因——超限或不合规是 `跳过图片：<原因>`、一次请求超过 4 张是 `跳过图片：本次请求最多 4 张，已丢弃后续图片。`，整条 wire 序列化超过 20,000,000 字符则是 `丢弃本次全部 <N> 张图片：…只保留文本。`（`server/server.js` 的 `buildImagePart` / `buildWire`）。日志里出现「跳过 / 丢弃」就说明图在服务端就被拦下了，跟模型能力无关。
+2. **中继有没有把图转成图片 part**：中继日志里会写跳过原因——超限或不合规是 `跳过图片：<原因>`、一次请求超过 4 张是 `跳过图片：本次请求最多 4 张，已丢弃后续图片。`，整条 wire 序列化超过 20,000,000 字符则是 `丢弃本次全部 <N> 张图片：…只保留文本。`（`studio-api 的 server.js` 的 `buildImagePart` / `buildWire`）。日志里出现「跳过 / 丢弃」就说明图在服务端就被拦下了，跟模型能力无关。
 3. **页面执行器在不在线**：`GET /pg/healthz` 的 `executors` 数组为空 = 没有执行器能跑这一路，回复会超时或落到别的路径；数组里有条目时再看每条的 `clientVersion`——低于中继要求的 `minClientVersion` 会被直接拒（日志 `客户端版本过低（<ver>）…`），执行器上线那行是 `执行器上线 key=… version=… kind=…`。
 
 三条都过了还答非所问，就去看首段请求到底带没带图：成功日志里 ` images=` 紧跟 `cont=`（`src/core/chat/service.ts:1183-1186`），没有这个字段就是这一轮没带图（§19.7）。
@@ -2124,7 +2124,7 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 
 | 看哪里 | 命令 / 日志 | 怎么读 |
 | --- | --- | --- |
-| ① 中继侧 | `curl -s https://example.com/pg/healthz \| head -c 300` | 看 `executors[0].requestsFailed`：**在涨** = 请求确实到了执行器、执行器没答（超时那一类）；返回 `executors: []` 或 `503 executor_offline` 是执行器掉线，另一类问题（`docs/hosting.md` §15.5） |
+| ① 中继侧 | `curl -s https://example.com/pg/healthz \| head -c 300` | 看 `executors[0].requestsFailed`：**在涨** = 请求确实到了执行器、执行器没答（超时那一类）；返回 `executors: []` 或 `503 executor_offline` 是执行器掉线，另一类问题 |
 | ② 容器日志 | `docker compose logs bot \| grep 'len=0'` | `回复成功 … len=0` 就是「被记成成功的空回复」——`len` 是落库正文字数（`docs/architecture.md` §37.4），0 说明一个可见字符都没有 |
 | ③ 错误日志 | `docker compose logs bot \| grep 'ALL_PROVIDERS_FAILED'` | 修复后同一场故障落在这里：`回复失败 ALL_PROVIDERS_FAILED: [{"model":{…},"error":"openai-compat: executor_timeout: 执行器超时"}]`，或者 `"error":"EMPTY_RESPONSE"` |
 
