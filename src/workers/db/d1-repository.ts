@@ -136,6 +136,7 @@ interface RouteRow {
   seed: number | null;
   frequency_penalty: number | null;
   presence_penalty: number | null;
+  reasoning_effort: string | null;
 }
 
 interface KeyRow {
@@ -561,6 +562,7 @@ function toRouteConfig(row: RouteRow): RouteConfig {
   if (row.seed !== null) cfg.seed = row.seed;
   if (row.frequency_penalty !== null) cfg.frequencyPenalty = row.frequency_penalty;
   if (row.presence_penalty !== null) cfg.presencePenalty = row.presence_penalty;
+  if (row.reasoning_effort !== null) cfg.reasoningEffort = row.reasoning_effort;
   return cfg;
 }
 
@@ -875,7 +877,7 @@ export function createRepositories(
   const routes: RouteRepository = {
     async get(key: ScopedKey): Promise<RouteConfig | null> {
       const row = await db
-        .prepare('SELECT scope, scope_id, primary_provider, primary_model, fallbacks_json, temperature, max_tokens, top_p, top_k, seed, frequency_penalty, presence_penalty FROM routes WHERE scope = ? AND scope_id = ?')
+        .prepare('SELECT scope, scope_id, primary_provider, primary_model, fallbacks_json, temperature, max_tokens, top_p, top_k, seed, frequency_penalty, presence_penalty, reasoning_effort FROM routes WHERE scope = ? AND scope_id = ?')
         .bind(key.scope, key.scopeId)
         .first<RouteRow>();
       return row === null ? null : toRouteConfig(row);
@@ -883,7 +885,7 @@ export function createRepositories(
 
     async list(): Promise<Array<RouteConfig & ScopedKey>> {
       const { results } = await db
-        .prepare('SELECT scope, scope_id, primary_provider, primary_model, fallbacks_json, temperature, max_tokens, top_p, top_k, seed, frequency_penalty, presence_penalty FROM routes ORDER BY scope, scope_id')
+        .prepare('SELECT scope, scope_id, primary_provider, primary_model, fallbacks_json, temperature, max_tokens, top_p, top_k, seed, frequency_penalty, presence_penalty, reasoning_effort FROM routes ORDER BY scope, scope_id')
         .all<RouteRow>();
       return (results ?? []).map(toScopedRoute);
     },
@@ -891,7 +893,7 @@ export function createRepositories(
     async put(key: ScopedKey, cfg: RouteConfig): Promise<void> {
       await db
         .prepare(
-          `INSERT INTO routes (scope, scope_id, primary_provider, primary_model, fallbacks_json, temperature, max_tokens, top_p, top_k, seed, frequency_penalty, presence_penalty, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO routes (scope, scope_id, primary_provider, primary_model, fallbacks_json, temperature, max_tokens, top_p, top_k, seed, frequency_penalty, presence_penalty, reasoning_effort, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (scope, scope_id) DO UPDATE SET
              primary_provider = excluded.primary_provider,
              primary_model = excluded.primary_model,
@@ -903,6 +905,7 @@ export function createRepositories(
              seed = excluded.seed,
              frequency_penalty = excluded.frequency_penalty,
              presence_penalty = excluded.presence_penalty,
+             reasoning_effort = excluded.reasoning_effort,
              updated_at = excluded.updated_at`,
         )
         .bind(
@@ -918,6 +921,7 @@ export function createRepositories(
           cfg.seed ?? null,
           cfg.frequencyPenalty ?? null,
           cfg.presencePenalty ?? null,
+          cfg.reasoningEffort ?? null,
           nowIso(),
         )
         .run();

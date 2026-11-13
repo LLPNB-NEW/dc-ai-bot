@@ -168,6 +168,8 @@ export interface RouteItem {
   seed?: number;
   frequencyPenalty?: number;
   presencePenalty?: number;
+  // 思考强度：缺省 / 空串 = 这一层不发送（后端存 NULL），后端会去空格并转小写
+  reasoningEffort?: string;
 }
 
 // §20.2/§20.6：models 是「适用模型名单」，空数组 = 全部模型都可用。

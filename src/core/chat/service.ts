@@ -1483,6 +1483,8 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
     if (route.seed !== undefined) sampling.seed = route.seed;
     if (route.frequencyPenalty !== undefined) sampling.frequencyPenalty = route.frequencyPenalty;
     if (route.presencePenalty !== undefined) sampling.presencePenalty = route.presencePenalty;
+    // 思考强度：路由配了就用路由的；否则上下文工具模式仍用固定的 low，普通模式不发这个键
+    const reasoningEffort = route.reasoningEffort ?? (contextToolMode ? CONTEXT_TOOL_REASONING_EFFORT : undefined);
     // 本轮主对话要看的图（§22.6）：有 ctx.loadImages 才可能非空；异常已在 memo 里吞成空数组。
     // §41：这一层把主模型识图关掉时连取图都不取 —— 主对话这一轮 images 恒为空数组，主请求连键都不带；
     // 表情模型那一路自己调 memo，同一轮的图它照旧看得到，且关掉时不会多下载一次。
@@ -1528,8 +1530,8 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
             ...sampling,
             // §55：这一模式用自己那份工具（context + 回复工具），老模式逐字不变
             ...(contextToolMode ? contextToolFields : toolFields),
-            // §55：酒馆那条实发请求里的 reasoning_effort，只有这一模式带上
-            ...(contextToolMode ? { reasoningEffort: CONTEXT_TOOL_REASONING_EFFORT } : {}),
+            // §55：酒馆那条实发请求里的 reasoning_effort；路由配了就以路由为准
+            ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
           };
           if (temperature !== undefined) request.temperature = temperature;
           if (maxTokens !== undefined) request.maxTokens = maxTokens;
@@ -1587,7 +1589,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
                 ...(images.length > 0 ? { images } : {}),
                 ...sampling,
                 ...contextReplyFields,
-                reasoningEffort: CONTEXT_TOOL_REASONING_EFFORT,
+                ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
               };
               if (temperature !== undefined) retry.temperature = temperature;
               if (maxTokens !== undefined) retry.maxTokens = maxTokens;
@@ -1663,7 +1665,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
                 ...(images.length > 0 ? { images } : {}),
                 ...sampling,
                 ...contextReplyFields,
-                reasoningEffort: CONTEXT_TOOL_REASONING_EFFORT,
+                ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
               };
               if (temperature !== undefined) lineRequest.temperature = temperature;
               if (maxTokens !== undefined) lineRequest.maxTokens = maxTokens;
@@ -1701,6 +1703,7 @@ export function createChatService(deps: ChatServiceDeps): ChatService {
                 ...sampling,
                 // 同一轮的工具集跟着续写一起发：两段请求对模型给出同一套可用工具
                 ...toolFields,
+                ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
               };
               if (temperature !== undefined) continueRequest.temperature = temperature;
               if (maxTokens !== undefined) continueRequest.maxTokens = maxTokens;

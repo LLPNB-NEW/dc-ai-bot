@@ -33,6 +33,7 @@ export default function RoutesPage() {
   const [rows, setRows] = useState<FallbackRow[]>([]);
   const [temperature, setTemperature] = useState('');
   const [maxTokens, setMaxTokens] = useState('');
+  const [reasoningEffort, setReasoningEffort] = useState('');
   const [topP, setTopP] = useState('');
   const [topK, setTopK] = useState('');
   const [seed, setSeed] = useState('');
@@ -81,6 +82,7 @@ export default function RoutesPage() {
         fallbacks: rows.map((row) => ({ provider: row.provider, model: row.model.trim() })),
         temperature: parseOptionalNumber(temperature),
         maxTokens: parseOptionalNumber(maxTokens),
+        reasoningEffort: reasoningEffort === '' ? undefined : reasoningEffort,
         topP: parseOptionalNumber(topP),
         topK: parseOptionalNumber(topK),
         seed: parseOptionalNumber(seed),
@@ -117,6 +119,7 @@ export default function RoutesPage() {
     setRows(item.fallbacks.map((fallback) => newRow(fallback.provider, fallback.model)));
     setTemperature(formatNumber(item.temperature));
     setMaxTokens(formatNumber(item.maxTokens));
+    setReasoningEffort(item.reasoningEffort ?? '');
     setTopP(formatNumber(item.topP));
     setTopK(formatNumber(item.topK));
     setSeed(formatNumber(item.seed));
@@ -216,7 +219,19 @@ export default function RoutesPage() {
             <span>maxTokens（可选）</span>
             <input type="number" min="1" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} />
           </label>
+          <label className="field">
+            <span>思考强度（可选）</span>
+            <select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)}>
+              <option value="">默认（不发送）</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </label>
         </div>
+        <p className="hint">xhigh 仅 gemini-4-hydrogen；不填时上下文工具模式仍用 low，普通模式不发送。</p>
         <div className="row">
           <label className="field">
             <span>topP（可选，0–1）</span>

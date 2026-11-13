@@ -370,6 +370,46 @@ describe('admin routes', () => {
     expect(silentRow).toEqual({ top_p: null, top_k: null, seed: null, frequency_penalty: null, presence_penalty: null });
   });
 
+  it('思考强度：白名单、trim+小写归一、空串/缺省/null 清除（库 NULL）', async () => {
+    const { app, cookie } = await setup();
+    const primary = { provider: 'gemini', model: 'gemini-4-hydrogen' };
+    const base = { scope: 'global', primary, fallbacks: [] };
+
+    for (const extra of [
+      { reasoningEffort: 'ultra' },
+      { reasoningEffort: 1 },
+      { reasoningEffort: true },
+      { reasoningEffort: ['high'] },
+    ]) {
+      const res = await send(app, 'PUT', '/api/routes', { ...base, ...extra }, cookie);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'BAD_REQUEST' });
+    }
+
+    for (const reasoningEffort of ['minimal', 'low', 'medium', 'high', 'xhigh']) {
+      const res = await send(app, 'PUT', '/api/routes', { ...base, reasoningEffort }, cookie);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ...base, scopeId: '', reasoningEffort });
+    }
+
+    const upper = await send(app, 'PUT', '/api/routes', { ...base, reasoningEffort: ' XHIGH ' }, cookie);
+    expect(upper.status).toBe(200);
+    expect(await upper.json()).toEqual({ ...base, scopeId: '', reasoningEffort: 'xhigh' });
+    expect(await itemsOf(app, '/api/routes', cookie)).toEqual([{ ...base, scopeId: '', reasoningEffort: 'xhigh' }]);
+    expect(
+      await env.DB.prepare('SELECT reasoning_effort FROM routes WHERE scope = ? AND scope_id = ?').bind('global', '').first(),
+    ).toEqual({ reasoning_effort: 'xhigh' });
+
+    for (const extra of [{ reasoningEffort: '' }, { reasoningEffort: '   ' }, { reasoningEffort: null }, {}]) {
+      const cleared = await send(app, 'PUT', '/api/routes', { ...base, ...extra }, cookie);
+      expect(cleared.status).toBe(200);
+      expect(await cleared.json()).toEqual({ ...base, scopeId: '' });
+      expect(
+        await env.DB.prepare('SELECT reasoning_effort FROM routes WHERE scope = ? AND scope_id = ?').bind('global', '').first(),
+      ).toEqual({ reasoning_effort: null });
+    }
+  });
+
   it('三层各存各的采样：一层设了不会串到另一层', async () => {
     const { app, cookie } = await setup();
     const primary = { provider: 'anthropic', model: 'claude-3-5-sonnet-20241022' };

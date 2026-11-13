@@ -46,6 +46,7 @@ const EXPECTED_FILES = [
   '0034_world_book_state.sql',
   '0035_world_books_multi.sql',
   '0036_image_settings.sql',
+  '0037_route_reasoning.sql',
 ];
 
 const ROOT = mkdtempSync(join(tmpdir(), 'dc-ai-bot-migrate-'));
@@ -66,7 +67,7 @@ afterAll(() => {
 });
 
 describe('runMigrations', () => {
-  it('36 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
+  it('37 个迁移文件在一个空库上全部执行，第二次调用全部 skipped', async () => {
     const filePath = newDbPath();
     const first = await runMigrations(filePath, MIGRATIONS_DIR);
     expect(first.applied).toEqual(EXPECTED_FILES);
@@ -477,6 +478,47 @@ describe('runMigrations', () => {
         .bind('team', '', '2026-01-01T00:00:03.000Z')
         .run(),
     ).rejects.toThrow();
+  });
+
+  it('0037 给 routes 加 reasoning_effort TEXT：老行是 NULL，可写可清', async () => {
+    const filePath = newDbPath();
+    await runMigrations(filePath, MIGRATIONS_DIR);
+    const db = createSqliteDatabase(filePath);
+
+    const columns = await db
+      .prepare('PRAGMA table_info(routes)')
+      .all<{ name: string; type: string; notnull: number; pk: number; dflt_value: string | null }>();
+    expect(columns.results.find((column) => column.name === 'reasoning_effort')).toMatchObject({
+      name: 'reasoning_effort',
+      type: 'TEXT',
+      notnull: 0,
+      pk: 0,
+      dflt_value: null,
+    });
+
+    await db
+      .prepare('INSERT INTO routes (scope, scope_id, primary_provider, primary_model, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .bind('global', '', 'gemini', 'gemini-4-hydrogen', '2026-01-01T00:00:00.000Z')
+      .run();
+    expect(await db.prepare('SELECT reasoning_effort FROM routes WHERE scope = ? AND scope_id = ?').bind('global', '').first()).toEqual({
+      reasoning_effort: null,
+    });
+
+    await db
+      .prepare('UPDATE routes SET reasoning_effort = ? WHERE scope = ? AND scope_id = ?')
+      .bind('xhigh', 'global', '')
+      .run();
+    expect(await db.prepare('SELECT reasoning_effort FROM routes WHERE scope = ? AND scope_id = ?').bind('global', '').first()).toEqual({
+      reasoning_effort: 'xhigh',
+    });
+
+    await db
+      .prepare('UPDATE routes SET reasoning_effort = NULL WHERE scope = ? AND scope_id = ?')
+      .bind('global', '')
+      .run();
+    expect(await db.prepare('SELECT reasoning_effort FROM routes WHERE scope = ? AND scope_id = ?').bind('global', '').first()).toEqual({
+      reasoning_effort: null,
+    });
   });
 
   it('0032 重建 tts_settings：老行十二列原样保留，gemini 可写，脏方言被 CHECK 拒', async () => {

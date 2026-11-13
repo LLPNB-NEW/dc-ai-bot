@@ -2195,7 +2195,7 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 
 ## 33. 阶段二：采样参数与深度注入怎么查
 
-这一节对应阶段二的两项能力：路由采样参数（`topP` / `topK` / `seed` / `frequencyPenalty` / `presencePenalty`）与深度注入（`prompt_injections` 一层一行）。契约（字段、范围、位置算法、跨提供方映射）在 `docs/architecture.md` §49 与 §50。一句话记住两件事：**采样留空 = 这一层不设 / 深度注入正文留空 = 这一层关着**——两者都不是「填了 0」，也不是「填了空串」，而是这一层根本没有这个设置。
+这一节对应阶段二的两项能力：路由采样参数（`topP` / `topK` / `seed` / `frequencyPenalty` / `presencePenalty`）与深度注入（`prompt_injections` 一层一行）；后加的思考强度见 §33.5。契约（字段、范围、位置算法、跨提供方映射）在 `docs/architecture.md` §49 与 §50。一句话记住两件事：**采样留空 = 这一层不设 / 深度注入正文留空 = 这一层关着**——两者都不是「填了 0」，也不是「填了空串」，而是这一层根本没有这个设置。
 
 ### 33.1 判据链（按顺序走）
 
@@ -2239,6 +2239,16 @@ systemctl list-timers dc-ai-bot-backup-request.timer --no-pager   # 下一次轮
 - 迁移：`migrations/` 末尾是 `0027_route_sampling.sql`、`0028_prompt_injections.sql`，共 28 个；启动日志 `applied=28 skipped=0`（新库）或 `applied=2 skipped=26`（从 26 个迁移的库升级）——这是 `preset-2` 那一版的数字；`preset-3` 起是 29 个、末尾 `0029_world_books.sql`；`preset-4`（前一版）仍是 29、没有新迁移，见 §34.4；现行 `preset-head-1` 同样 29、没有新迁移，见 `docs/architecture.md` §52。
 - 门牌：`preset-import-2`（现版：导入酒馆预设时，预设里自己关着的段也带进来、保持停用，后台可逐段打开；停用段不搬去深度注入，宏照样映射，§58；无新迁移、迁移总数仍是 30。上一版 `context-stream-1`（上下文工具模式的上游从非流式 `chat()` 改成流式 `chatStream()`（`stream: true`），但仍整段攒完才交付、分支内一次进度都不推；适配器把 `choices[0].delta.tool_calls` 逐帧交出来（`ToolCallDelta`），服务层按 `index` 拼回完整工具调用再交给 `readToolReply`，空回与续写的判据一个字没动，§57）。再上一版 `preset-import-1`（酒馆预设导入可以选层——`scope` = `global` / `guild` / `channel`，整层覆盖目标层、其它层不动，采样参数按目标层继承，历史后指令写同一层的深度注入，原始 JSON 按层各存一行，§56）。再上一版 `context-tool-5`（把钉死的 `tool_choice` 改回 `'auto'`，`src/core/chat/service.ts:1236`）、`context-tool-4`（已回退，曾把 `tool_choice` 钉成回复工具）、`context-tool-3`（上下文工具模式首版），三版定位见 §55.1）；再往前 `reply-tool-3`（175225§54）；上一次构建 `reply-tool-2`（行为与现版相同，只是验收时临时在成功日志尾部多带 `rawLen=` / `rawShell=` 两个诊断字段，`len=472 … rawLen=505 rawShell=<game>:1,</game>:1` 就是它留下的证据；现已下线）；前一版 `reply-tool-1`（把模型写在正文里的 `story_reply` 工具调用壳剥掉再发——壳不再作为正文发到频道；同时把 tools 定义发进请求，当前中继对 tools 是空转的兼容性保留，无新迁移、迁移总数仍 29，§54）；再前一版 `identity-off-1`（有预设段时不再追加身份块——这一轮有效提示词里只要有任何启用的 `before` 段，`system` 里就没有身份块；身份块只在没有前置预设段时兜底，无新迁移、迁移总数仍 29，§53）；再再前一版 `preset-head-1`（预设 `before` 段回到 `system` 天头、长期记忆摘要搬出 `system` 改拼在本轮那条 user 消息最前面，无新迁移、迁移总数仍 29，§52）；再再再前一版 `identity-head-1`（身份块去掉 Discord 平台措辞、平台元信息回到 `system` 天头，无新迁移、迁移总数仍 29，§52）；再往前 `preset-4`（阶段四：酒馆预设导入的段顺序按提示词链还原，迁移总数仍 29，§48.8）；`preset-3`（阶段三：世界书 + 酒馆预设导入器修正，新增迁移 `0029_world_books.sql`、迁移总数 29，§51、§48.7；`src/workers/gateway/engine.ts:129`；`preset-2`（阶段二：路由采样参数 + 深度注入，§49、§50）；`preset-1` 是酒馆预设导入阶段一，§32），日志里看到 `build=reply-tool-3`。
 - 数据：`SELECT scope, scope_id, top_p, top_k, seed, frequency_penalty, presence_penalty FROM routes;` 看采样五列（`NULL` = 不设）；`SELECT scope, scope_id, depth, role, length(content) AS n, updated_at FROM prompt_injections ORDER BY scope, scope_id;` 看注入三层。
+
+### 33.5 思考强度（route-reasoning-1，0037）
+
+这一节只讲这一版新增的 `reasoningEffort`；33.4 里那些迁移数字是更早版本的历史值。
+
+- **配置**：`GET /api/routes` 的每一项可以带 `reasoningEffort`。只接受 `minimal` / `low` / `medium` / `high` / `xhigh`，其它值 `PUT /api/routes` 回 400 `BAD_REQUEST`；空串、`null`、缺省都表示这一层不设，库里写 `NULL`。路由是整层优先（`channel > guild > global`），不做字段合并。
+- **什么时候发**：主对话首段、空回补交付重试、画图后正文、续写都用路由这一层的值；路由没配时，上下文工具模式回退 `low`，普通模式请求里根本不出现 `reasoning_effort`。表情支线仍固定 `low`，不跟这个开关。
+- **gemini-4-hydrogen**：中继（`/opt/pg-relay`）把 `thinking_level`（或 `reasoning_effort`）翻成 `generationConfig` 的字符串档 `[null,null,null,"LOW"|"MEDIUM"|"HIGH"|"XHIGH"]`；`xhigh` 只对 hydrogen 有效，其他模型会记一行 `思考档位 effort=xhigh … 没有对应档位，已忽略` 后不传；hydrogen 的 `minimal` 同样忽略。`thinking_wire` 仍然是最高优先级的逃生口。
+- **怎么确认**：启动日志是 `build=route-reasoning-1`；从 36 个迁移的库升级应看到 `[node] 迁移已执行：0037_route_reasoning.sql` 与 `applied=1 skipped=36`。中继成功时日志是 `思考档位 thinking_level=HIGH wire=[null,null,null,"HIGH"]` 或 `思考档位 effort=high level=3 wire=[null,null,null,3]`；非 hydrogen 的 `thinking_level` 会记 `不适用`。
+- **回滚**：`UPDATE routes SET reasoning_effort = NULL WHERE scope = '<层>' AND scope_id = '<ID>';`；或 `PUT /api/routes` 带原来的 `primary` / `fallbacks`、不带 `reasoningEffort`（整层替换会把该列写成 `NULL`）。
 
 ## 34. 世界书与预设破限怎么查
 

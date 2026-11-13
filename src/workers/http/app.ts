@@ -188,6 +188,8 @@ const TOP_P_BOUNDS = { min: 0, max: 1, integer: false };
 const TOP_K_BOUNDS = { min: 1, max: 1000, integer: true };
 const SEED_BOUNDS = { min: 0, max: 2147483647, integer: true };
 const PENALTY_BOUNDS = { min: -2, max: 2, integer: false };
+/** 思考强度是模型能力，不是自由文本；空串 = 这一层不设，PUT 整层替换时缺省也会清除旧值 */
+const REASONING_EFFORTS: readonly string[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 /** §28.10：一份提示词最多 8000 字；超了多半是贴了整段对话进来，不是文案 */
 const MAX_REACTION_GUIDE_CHARS = 8000;
 /** 正文表情提示词同样是 8000 字上限；它只是贴在表情清单后的一句补充，超长多半是贴错了东西 */
@@ -432,6 +434,18 @@ function readOptionalString(body: Record<string, unknown>, key: string): Optiona
   const value = body[key];
   if (value === undefined || value === null) return { invalid: false };
   return typeof value === 'string' ? { value, invalid: false } : { invalid: true };
+}
+
+/** 思考强度：缺省/null/空白串都算这一层不设；大小写与首尾空格归一后再白名单校验 */
+function readReasoningEffort(body: Record<string, unknown>): OptionalString {
+  const value = body['reasoningEffort'];
+  if (value === undefined || value === null) return { invalid: false };
+  if (typeof value !== 'string') return { invalid: true };
+  const normalized = value.trim().toLowerCase();
+  if (normalized === '') return { value: '', invalid: false };
+  return REASONING_EFFORTS.includes(normalized)
+    ? { value: normalized, invalid: false }
+    : { invalid: true };
 }
 
 interface NumberBounds {
@@ -1712,6 +1726,7 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     const seed = readOptionalNumber(body, 'seed', SEED_BOUNDS);
     const frequencyPenalty = readOptionalNumber(body, 'frequencyPenalty', PENALTY_BOUNDS);
     const presencePenalty = readOptionalNumber(body, 'presencePenalty', PENALTY_BOUNDS);
+    const reasoningEffort = readReasoningEffort(body);
     if (
       temperature.invalid ||
       maxTokens.invalid ||
@@ -1719,7 +1734,8 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
       topK.invalid ||
       seed.invalid ||
       frequencyPenalty.invalid ||
-      presencePenalty.invalid
+      presencePenalty.invalid ||
+      reasoningEffort.invalid
     ) {
       return badRequest(c);
     }
@@ -1753,6 +1769,9 @@ export function createAdminApp(deps: AdminAppDeps): Hono {
     if (seed.value !== undefined) cfg.seed = seed.value;
     if (frequencyPenalty.value !== undefined) cfg.frequencyPenalty = frequencyPenalty.value;
     if (presencePenalty.value !== undefined) cfg.presencePenalty = presencePenalty.value;
+    if (reasoningEffort.value !== undefined && reasoningEffort.value !== '') {
+      cfg.reasoningEffort = reasoningEffort.value;
+    }
 
     await deps.routes.put(key, cfg);
     return c.json(routeDto(key, cfg));

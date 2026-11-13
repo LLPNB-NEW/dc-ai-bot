@@ -3956,6 +3956,38 @@ describe('§55 上下文工具模式（contextTool）', () => {
     expect(requests[0]?.reasoningEffort).toBe('low');
   });
 
+  it('路由配了思考强度时以路由为准：上下文工具模式覆盖 low，普通模式也发送', async () => {
+    const contextRequests: LlmRequest[] = [];
+    const contextHarness = makeHarness({
+      providers: {
+        'openai-compat': toolProvider(
+          'openai-compat',
+          { text: '', toolCalls: [{ name: 'story_reply', arguments: REPLY_ARGS }] },
+          { onRequest: (req) => contextRequests.push(req) },
+        ),
+      },
+      keys: { 'openai-compat': decryptedKey('openai-compat') },
+      routes: { global: { ...ROUTE, reasoningEffort: 'xhigh' } },
+      channelMemory: memoryConfig({ contextTool: true }),
+    });
+
+    await createChatService(contextHarness.deps).run(CTX);
+    expect(contextRequests[0]?.reasoningEffort).toBe('xhigh');
+
+    const plainRequests: LlmRequest[] = [];
+    const plainHarness = makeHarness({
+      providers: {
+        'openai-compat': streamProvider('openai-compat', ['好的'], { onRequest: (req) => plainRequests.push(req) }),
+      },
+      keys: { 'openai-compat': decryptedKey('openai-compat') },
+      routes: { global: { ...ROUTE, reasoningEffort: 'high' } },
+      channelMemory: memoryConfig({ contextTool: false }),
+    });
+
+    await createChatService(plainHarness.deps).run(CTX);
+    expect(plainRequests[0]?.reasoningEffort).toBe('high');
+  });
+
   it('描述体的历史按 2500 字裁：只留最近几条，顺序仍是旧→新', async () => {
     const requests: LlmRequest[] = [];
     const long = (index: number): string => '第' + String(index) + '条' + '甲'.repeat(990);

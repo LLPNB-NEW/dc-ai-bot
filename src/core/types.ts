@@ -210,6 +210,8 @@ export interface RouteConfig {
   seed?: number;
   frequencyPenalty?: number;
   presencePenalty?: number;
+  // 思考强度：缺省 = 这一层不设；上下文工具模式仍回退到 low，普通模式不发这个键
+  reasoningEffort?: string;
 }
 
 export interface ProviderKey {

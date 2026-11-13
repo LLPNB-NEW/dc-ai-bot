@@ -3977,7 +3977,7 @@ judge 的产出要过逐字校验，共有四种结局：
 - 迁移：这一版没有新迁移，仍是 29 个、末尾 `0029_world_books.sql`；新库首启 `applied=29 skipped=0`，已有 29 个迁移的库就地升级是 `applied=0 skipped=29`。
 - 判据：导入后顺序不对，按 `docs/operations.md` §34.1 第 8 条回读 `GET /api/prompts`，把目标层（`preset-1` 到 `preset-4` 是 global 层）的段按 `position` 排出来与酒馆的链逐项对。
 
-## 49. 路由采样参数
+## 49. 路由采样参数与思考强度
 
 模型路由的三层配置多了五个可选的采样参数：`topP` / `topK` / `seed` / `frequencyPenalty` / `presencePenalty`。它们跟 `temperature` / `maxTokens` 存在同一张 `routes` 表、同一份三层配置里，命中哪一层就整层生效；**留空 = 这一层不设，交给上游自己的默认**，而 `0` 是有效值——`topP: 0` 与「没填」在库里、接口上、线缆上都是两件事。提示词层没有这五项：采样只从路由取。
 
@@ -4032,6 +4032,18 @@ judge 的产出要过逐字校验，共有四种结局：
 | `src/core/providers/gemini.ts:55-59` | `generationConfig` 五项 |
 | `src/core/providers/anthropic.ts:82-83` | 只发 `top_p` |
 | `web/src/pages/RoutesPage.tsx:222-241` | 后台两排输入框（留空 = 不设） |
+
+### 49.5 思考强度（reasoningEffort，0037）
+
+同一张 `routes` 表、同一份三层配置里还多了一个**可选字符串** `reasoningEffort`；它跟采样参数一样是「命中哪一层就整层生效」，**留空 = 这一层不设**，不是数值、也不参与提示词层的继承。
+
+- 迁移：`migrations/0037_route_reasoning.sql` 给 `routes` 加 `reasoning_effort TEXT`，全可空（`NULL` = 这一层不设）。
+- 类型：`RouteConfig.reasoningEffort?: string`（`src/core/types.ts:214`）；上游请求字段在 `LlmRequest.reasoningEffort?: string`（`src/core/types.ts:290`）。
+- 接口：`PUT /api/routes` 读 `reasoningEffort`（`src/workers/http/app.ts:1729`），白名单只有 `minimal` / `low` / `medium` / `high` / `xhigh`（`:190-191`），读入时 `trim` + 转小写（`:439-450`）；白名单外一律 `400 BAD_REQUEST`（`:1737`），空串 / `null` / 缺省都表示清除这一层（库 `NULL`）。只有非空值才写进 `cfg`（`:1772-1774`）。`GET` 原样带回。
+- 存：`src/workers/db/d1-repository.ts` 的行类型 `:139`、行 → 配置 `:565`（只在非 `NULL` 时写键）、SELECT `:880` / `:888`、UPSERT 列与冲突更新 `:896` / `:908`、绑定 `:924`。
+- 服务优先级：`route.reasoningEffort ?? (contextToolMode ? CONTEXT_TOOL_REASONING_EFFORT : undefined)`（`src/core/chat/service.ts:1487`）。也就是说，**路由配了就以路由为准**；路由没配时，只有上下文工具模式仍回退到固定的 `low`，普通模式完全不发这个键。四个请求点都带同一个值：首段 `:1534`、空回补交付重试 `:1592`、画图后的正文 `:1668`、续写 `:1706`。
+- 线缆：`openai-compat` 只在非空时发 `reasoning_effort`（`src/core/providers/openai-compat.ts:78-80`），所以「没配」与「配了空串」在请求体里都是这个键不出现；`gemini` / `anthropic` 适配器不认这个键，静默忽略。中继把它翻成 `generation_config.thinking_config`：老模型走数字档（`minimal`/`low` → 1、`medium` → 2、`high` → 3，`xhigh` 无对应档位、记日志后不发）；`gemini-4-hydrogen` 走字符串档（`LOW` / `MEDIUM` / `HIGH` / `XHIGH`），也接受客户端显式传的 `thinking_level`（见 `data/deploy-pg-relay/server.js:1830-1833` / `:1853-1889`）。中继的 OpenAI body parser 已透传 `thinking_level`（`:3302`）。
+- 后台：「模型路由」卡片的「思考强度（可选）」下拉（`web/src/pages/RoutesPage.tsx:222-232`），选项为默认（不发送）/ `minimal` / `low` / `medium` / `high` / `xhigh`；保存时空串转 `undefined`（`:85`）、读回 `item.reasoningEffort ?? ''`（`:122`），hint 在 `:234`。
 
 ## 50. 深度注入
 
@@ -4426,7 +4438,7 @@ const identityBlock =
 
 - `context-tool-1`（首版）：先证明形状本身能进角色——预设正文与最近历史塞进一个 `context` 工具的描述体，顶层只发**一条用户原话**。原话仍留在 `messages` 里，所以它还会踩 55.2 那个拒答。
 - `context-tool-2`：把顶层那条消息从用户原话换成固定句 `CONTEXT_TOOL_TURN = '请继续 context 中的互动游戏。'`（`src/core/chat/context-tool.ts:28`），原话挪进描述体最后一段；同时加历史预算 `budgetedHistory`（`:48-63`）与 `CONTEXT_TOOL_HISTORY_CHARS = 8000`（`:42`），避免 `historyMaxMessages` 上千条时描述体涨成十万字。
-- `context-tool-3`（§55 那一版；现版是 `context-tool-6`，见 §59）：在 2 之上补齐两件对齐酒馆实发请求的事——`reasoning_effort = 'low'`（`service.ts:1320`）与 `max_tokens` 兜底 `CONTEXT_TOOL_MAX_TOKENS = 65535`（`:1263-1265`）。这两项照抄酒馆那条请求（`context-tool.ts:30-36`），让采样预算不成为我们这边多出来的变量；路由或提示词层显式配了 `maxTokens` 就尊重配置，65535 只是兜底。
+- `context-tool-3`（§55 那一版；现版是 `context-tool-6`，见 §59）：在 2 之上补齐两件对齐酒馆实发请求的事——`reasoning_effort`（当时固定 `'low'`，0037 起改为「路由配了就用路由的，没配仍回退 `low`」）与 `max_tokens` 兜底 `CONTEXT_TOOL_MAX_TOKENS = 65535`（`src/core/chat/context-tool.ts:42`）。这两项照抄酒馆那条请求（`context-tool.ts:30-36`），让采样预算不成为我们这边多出来的变量；路由或提示词层显式配了 `maxTokens` 就尊重配置，65535 只是兜底。
 - 再往前：`reply-tool-3`（§54）→ `reply-tool-1` → `identity-off-1`（§53）→ `preset-head-1` / `identity-head-1`（§52）→ `preset-4`（§48.8）。
 
 ### 55.2 为什么把用户原话从 messages 里拿掉
@@ -4459,7 +4471,7 @@ const identityBlock =
 - `messages`：只有一条 `{ role: 'user', content: CONTEXT_TOOL_TURN }`（`:1216-1218`）。原来拼进 user 消息的摘要块这时不再拼（`:1209-1210` 先判模式）。
 - `tools`：两个（`:1223-1237`，定义在 `context-tool.ts:140-172`）——`context` 只有一个 `query` 参数，`story_reply` 有 `think_nya` / `game_content` / `extra`，`required: ['game_content']`；`tool_choice: 'auto'`。
 - `maxTokens`：`route.maxTokens ?? promptHit.cfg.maxTokens ?? CONTEXT_TOOL_MAX_TOKENS`（`:1263-1265`）；老模式仍是 `route.maxTokens ?? promptHit.cfg.maxTokens`，没有 65535 这层兜底。
-- `reasoningEffort: CONTEXT_TOOL_REASONING_EFFORT`（`:1318-1320`）。类型在 `src/core/types.ts:257`（`LlmRequest.reasoningEffort?: string`），provider 在 `src/core/providers/openai-compat.ts:71-73` **只在非空时**发 `reasoning_effort`；键序是 `top_p`（`:69`）→ `reasoning_effort`（`:71-73`）→ `frequency_penalty` / `presence_penalty`（`:74-75`）→ `seed`（`:76`）。老模式根本不带这个键。
+- `reasoningEffort`：0037 起是 `route.reasoningEffort ?? (contextToolMode ? CONTEXT_TOOL_REASONING_EFFORT : undefined)`（`src/core/chat/service.ts:1487`），**路由配了就以路由为准**；没配时上下文工具模式仍回退到常量 `'low'`（`src/core/chat/context-tool.ts:42`），普通模式完全不发这个键。类型在 `src/core/types.ts:290`（`LlmRequest.reasoningEffort?: string`），provider 在 `src/core/providers/openai-compat.ts:78-80` **只在非空时**发 `reasoning_effort`；键序是 `top_p` → `reasoning_effort` → `frequency_penalty` / `presence_penalty` → `seed`。
 - 调用方式（**历史**：`context-tool-1` … `context-tool-5` 都是非流式 `chat()`）：正文从 `tool_calls` 里取（`:1327-1335`，当时的注释写明流式拿不到 `tool_calls`）。`context-stream-1` 起改成流式 `chatStream()`，但仍然整段攒完才交付，见 §57。
 
 ### 55.5 描述体：五段，本轮原话永远最后
@@ -4512,9 +4524,9 @@ const identityBlock =
 | `src/core/chat/context-tool.ts:118-134` / `:140-172` / `:178-183` | `readToolReply` / 两个工具定义 / `composeContextBody` |
 | `src/core/chat/service.ts:1105` | `contextToolMode`（唯一判据） |
 | `src/core/chat/service.ts:1180` / `:1216-1218` / `:1223-1237` | system / messages / tools 与描述体 |
-| `src/core/chat/service.ts:1263-1265` / `:1318-1320` | maxTokens 三层兜底 / reasoningEffort |
+| `src/core/chat/service.ts:1487` | reasoningEffort（路由优先，未配时上下文模式回退 low） |
 | `src/core/chat/service.ts:1327-1335` / `:1428` / `:1473` | chat + 读工具回复 / stripWrapperTags / 日志尾 `mode=context`（非流式是**历史**：`context-stream-1` 起改流式 `chatStream()` + `accumulateToolCalls` 拼回，见 §57.5） |
-| `src/core/types.ts:257` / `src/core/providers/openai-compat.ts:71-73` | `reasoningEffort` 字段 / `reasoning_effort` 透传 |
+| `src/core/types.ts:290` / `src/core/providers/openai-compat.ts:78-80` | `reasoningEffort` 字段 / `reasoning_effort` 透传 |
 | `src/workers/gateway/engine.ts:129` | `GATEWAY_BUILD = 'context-stream-1'`（§55 当时是 `context-tool-3`，当时见 §57.9） |
 | `test/gateway.node.test.ts:229` | 期望 `[gateway] node host started build=context-stream-1`（§55 当时是 `context-tool-3`，当时见 §57.9） |
 | `test/chat.context-tool.test.ts` | `readToolReply` / `budgetedHistory` / 固定句不含 discord 与机器人 |
@@ -4670,7 +4682,7 @@ export interface ToolCallDelta {
 
 - 空回（`:1366-1369`）：`if (raw.trim() === '')` 原样保留。顺序是**先拼回、再判空**，所以「只有 `tool_calls`、正文 delta 为空」的流不会被误判成 `EMPTY_RESPONSE`。
 - 续写（`:1373-1380`）：`while (!contextToolMode && …)` 仍然 false 短路；注释改成真实原因——这一模式靠工具调用**一次性交付**，正文不是按文本长度截断的，续写没有意义。
-- 请求形状的差异只有 `stream: true` 这一项：`tools` 定义、`tool_choice: 'auto'`、`reasoning_effort`、`max_tokens` 三层兜底与键序一个字节没动。
+- 请求形状的差异只有 `stream: true` 这一项：`tools` 定义、`tool_choice: 'auto'`、`max_tokens` 三层兜底与键序一个字节没动；`reasoning_effort` 0037 起按「路由配了就用路由，否则上下文模式仍 `low`」取。
 
 ### 57.7 生产探针：中继确实会流式回工具调用
 
@@ -4783,7 +4795,7 @@ export interface ToolCallDelta {
 | `system` | `contextReplySystem`（`src/core/chat/service.ts:1245`）＝ `CONTEXT_REPLY_SYSTEM_PREFIX` + `contextBody` |
 | `tools` | 只留 `replyOnlyTools()`（`src/core/chat/context-tool.ts:212`，定义来自私有的 `replyToolDefinition()`，`:189`） |
 | `toolChoice` | `'auto'` |
-| `reasoningEffort` | `CONTEXT_TOOL_REASONING_EFFORT`（`'low'`） |
+| `reasoningEffort` | 路由配了就用路由；没配时 `CONTEXT_TOOL_REASONING_EFFORT`（`'low'`） |
 | `temperature` / `maxTokens` / `images` | 与首回合完全相同 |
 | `messages` | 与首回合完全相同 |
 
@@ -5305,8 +5317,8 @@ export interface ToolCallDelta {
 ### 68.6 这条支线也钉最低思考档
 
 - 改了什么：`buildReactionRequest` 的 `LlmRequest` 多一个 `reasoningEffort: REACTION_REASONING_EFFORT`（`src/core/chat/reaction.ts:43` 起的常量 = `'low'`，赋值在 `:190` 附近）。挑一个表情不需要推导，线上实测那一路 7.0s 里大半是默认档位的思考时间。
-- 为什么钉在这里而不是后台可配：`reasoning_effort` 已经是这条链路的固定契约（主链在 `src/core/chat/service.ts:1429` 也写死 `low`），再多一个后台开关只会多一种「配错就慢」的分支。
-- 生效路径：`src/core/providers/openai-compat.ts:78` 把 `reasoningEffort` 发成 `reasoning_effort` → 中继 `thinkingConfigOf()`（`data/deploy-pg-relay/server.js:1323`）翻成 `wire[3][16] = [null,null,null,1]`，日志 `思考档位 effort=low level=1 …`。Anthropic 通道不列这个键，静默忽略。
+- 为什么表情支线仍钉在这里：它不是主对话，挑一个表情不需要推导，线上实测那一路 7.0s 里大半是默认档位的思考时间；0037 只把主对话的思考强度做成可配，表情支线仍是固定 `low`，免得「配错就慢」的分支多一条。
+- 生效路径：`src/core/providers/openai-compat.ts:78` 把 `reasoningEffort` 发成 `reasoning_effort` → 中继 `thinkingConfigOf()`（`data/deploy-pg-relay/server.js:1853`）翻成 `wire[3][16] = [null,null,null,1]`，日志 `思考档位 effort=low level=1 …`。Anthropic 通道不列这个键，静默忽略。
 - 测试：`test/chat.reaction-json.test.ts:76` 起一例断言 `req.reasoningEffort` 就是那个常量且等于 `'low'`。
 - 已知不变：它只影响「多快想完」，不影响贴不贴、贴几个、结构化输出；关掉（把常量删掉）就退回默认档位，别的都不动。
 
