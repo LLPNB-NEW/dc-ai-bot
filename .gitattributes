@@ -1,0 +1,5 @@
+# 部署包用 git archive 生成。Windows 上 core.autocrlf=true 时 archive 会把 LF 翻成 CRLF，
+# 脚本 shebang 就会带上 \r，systemd 直接报 env: $'bash\r': No such file or directory。
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf

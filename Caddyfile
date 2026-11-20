@@ -1,0 +1,35 @@
+{
+	# 只用于 ACME 到期提醒；留空会让全局块解析失败，.env 里必须填
+	email {$ACME_EMAIL}
+}
+
+{$SITE_ADDRESS:example.com} {
+	encode zstd gzip
+
+	# 接口与 Discord 交互回包必须实时：缓存一个 2xx 会让前端读到过期数据
+	@dynamic path /api/* /interactions*
+	header @dynamic Cache-Control "no-store"
+
+	# 其余一切静态产物给 1 小时，发版前避免客户端反复回源
+	@cacheable not path /api/* /interactions*
+	header @cacheable Cache-Control "public, max-age=3600"
+
+	# 入口 HTML 决定客户端拿到哪一版 assets 清单，缓存住就等于锁死在旧版本
+	@entrypoint path / /index.html
+	header @entrypoint Cache-Control "no-cache"
+
+	# ── Gemini Playground 中继：挂在 /pg 前缀下（handle_path 会先剥掉 /pg 再交给中继）
+	# 复用本站点的 80/443 与证书，不需要给中继单独配 DNS；上游是 /opt/pg-relay 那个
+	# 独立 compose 项目的容器名（它 join 了 dc-ai-bot_default 网络）
+	handle_path /pg/* {
+		header Cache-Control "no-store"
+		reverse_proxy pg-relay:8787 {
+			# 流式响应不能被缓冲
+			flush_interval -1
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+		}
+	}
+
+	reverse_proxy bot:8787
+}

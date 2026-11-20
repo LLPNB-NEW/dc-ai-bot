@@ -1,0 +1,11 @@
+[Unit]
+Description=Run dc-ai-bot DNS sync every 2 minutes
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=120s
+OnUnitInactiveSec=120s
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,7 @@
+{
+  "name": "dc-ai-bot-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M5 SPA 的 Vite root 标记；依赖统一由仓库根 package.json 提供，此处不安装任何依赖。"
+}
